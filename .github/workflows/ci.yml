@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Install ffmpeg and fonts (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg fonts-dejavu-core
+      - name: Format
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Test (all features)
+        run: cargo test --release
+      - name: Test (no default features)
+        run: cargo test --release --no-default-features
+      - name: Script runner end-to-end (only script + video left behind)
+        run: cargo test --release --test output -- --ignored
+      - name: Render every example (CPU, last frame only)
+        shell: bash
+        run: |
+          for ex in square_to_circle showcase graphing benchmark trajectory; do
+            cargo run -q --release --example "$ex" -- -ql -s --renderer cpu -q
+          done
