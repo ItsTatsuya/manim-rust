@@ -437,6 +437,9 @@ impl VMobject {
 
     /// Scale independently along one axis (0 = x, 1 = y).
     pub fn stretch(self, factor: f64, dim: usize) -> Self {
+        if dim > 2 {
+            return self;
+        }
         let c = self.get_center();
         self.map_points(|mut p| {
             p[dim] = c[dim] + (p[dim] - c[dim]) * factor;
@@ -853,8 +856,13 @@ impl PathFunc {
             PathFunc::Straight => a.lerp(b, t),
             PathFunc::Arc(angle) if angle.abs() < 1e-6 => a.lerp(b, t),
             PathFunc::Arc(angle) => {
+                let half_tan = (angle / 2.0).tan();
+                // A whole number of turns has no finite arc center: travel straight.
+                if half_tan.abs() < 1e-6 || !half_tan.is_finite() {
+                    return a.lerp(b, t);
+                }
                 let v = b - a;
-                let center = a + v * 0.5 + OUT.cross(v * 0.5) / (angle / 2.0).tan();
+                let center = a + v * 0.5 + OUT.cross(v * 0.5) / half_tan;
                 let (s, c) = (angle * t).sin_cos();
                 let d = a - center;
                 center + Point::new(d.x * c - d.y * s, d.x * s + d.y * c, d.z)

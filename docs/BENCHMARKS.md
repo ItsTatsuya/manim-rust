@@ -89,9 +89,9 @@ kept out of the engine. ffmpeg stays the MP4 encoder and the audio muxer.
 
 | Candidate | Result | Why not |
 |---|---|---|
-| Windows Media Foundation (H.264 + AAC, in-process, no ffmpeg) | On 4 cores: 60 s narrated scene 4.3 s vs 12.0 s (ffmpeg NVENC); Showcase 3.3 s vs 4.3 s | Windows-only second code path, untested on Intel/AMD iGPUs, MF quirks (its faststart option writes corrupt files), files 1.5–3× larger |
+| Windows Media Foundation (H.264 + AAC, in-process, no ffmpeg) | On 4 cores: 60 s narrated scene 4.3 s vs 12.0 s (ffmpeg NVENC); Showcase 3.3 s vs 4.3 s | Shipped for a while, then removed: Studio needs ffmpeg anyway, so a Windows-only second encoder path wasn't worth keeping. Also: MF's faststart option writes corrupt files, and files were 1.5–3× larger |
 | openh264 + muxide | 10–50× slower than x264 (no nasm → no SIMD), Baseline profile only | Too slow |
-| vello (GPU compute) | Readback-bound: 474–520 fps on light scenes vs 641–670 for the wgpu renderer; ≤16% faster on the 400-shape scene | Not faster; needs wgpu 24 → 30 |
+| vello (GPU compute) | Readback-bound: 474–520 fps on light scenes vs 641–670 for the wgpu renderer; ≤16% faster on the 400-shape scene | Not faster; needs wgpu 30 (the renderer is on wgpu 29) |
 | vello_hybrid | 139–154 fps on the 400-shape scene | Slower everywhere |
 
 ## Reproduce

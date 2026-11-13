@@ -367,27 +367,38 @@ fn leaf_infos(leaves: &[VMobject]) -> Vec<LeafInfo> {
 /// in reading order; extra ones merge into, or split from, their neighbours).
 fn monotone_pairs(long: &[VMobject], short: &[VMobject]) -> Vec<usize> {
     let (n, m) = (long.len(), short.len());
+    if m == 0 || n == 0 {
+        return vec![0; n];
+    }
+    // short[j] is reachable from long[i] only for lo(i) <= j <= i, a band of width n-m+1.
+    let w = n - m + 1;
+    if n.saturating_mul(w) > MAX_ALIGN_CELLS {
+        // Too big to search: spread the short list evenly over the long one.
+        return (0..n).map(|i| (i * m / n).min(m - 1)).collect();
+    }
+    let lo = |i: usize| i.saturating_sub(n - m);
     let (il, is) = (leaf_infos(long), leaf_infos(short));
     let cost = |i: usize, j: usize| {
         let shape = if same_shape(&long[i], &short[j]) { 0.0 } else { 0.3 };
         il[i].rel.distance(is[j].rel) + 0.15 * (il[i].size / is[j].size).ln().abs() + shape
     };
-    // d[i][j]: cheapest way to map long[..=i] with long[i] → short[j].
-    let mut d = vec![vec![f64::INFINITY; m]; n];
-    let mut from_diag = vec![vec![false; m]; n];
-    d[0][0] = cost(0, 0);
+    // d[i*w + (j - lo(i))]: cheapest way to map long[..=i] with long[i] → short[j].
+    let mut d = vec![f64::INFINITY; n * w];
+    let mut from_diag = vec![false; n * w];
+    let at = |i: usize, j: usize| -> Option<usize> {
+        let l = lo(i);
+        (j >= l && j <= i && j - l < w).then(|| i * w + (j - l))
+    };
+    d[0] = cost(0, 0);
     for i in 1..n {
-        // short[j] can only be reached once i >= j, and must leave room for the rest.
-        for j in 0..m {
-            if j > i || m - j > n - i {
-                continue;
-            }
-            let stay = d[i - 1][j];
-            let step = if j > 0 { d[i - 1][j - 1] } else { f64::INFINITY };
+        for j in lo(i)..=i.min(m - 1) {
+            let stay = at(i - 1, j).map_or(f64::INFINITY, |k| d[k]);
+            let step = if j > 0 { at(i - 1, j - 1).map_or(f64::INFINITY, |k| d[k]) } else { f64::INFINITY };
             let (best, diag) = if step <= stay { (step, true) } else { (stay, false) };
             if best.is_finite() {
-                d[i][j] = best + cost(i, j);
-                from_diag[i][j] = diag;
+                let k = at(i, j).unwrap();
+                d[k] = best + cost(i, j);
+                from_diag[k] = diag;
             }
         }
     }
@@ -395,12 +406,15 @@ fn monotone_pairs(long: &[VMobject], short: &[VMobject]) -> Vec<usize> {
     let mut j = m - 1;
     for i in (0..n).rev() {
         out[i] = j;
-        if i > 0 && from_diag[i][j] {
+        if i > 0 && j > 0 && at(i, j).is_some_and(|k| from_diag[k]) {
             j -= 1;
         }
     }
     out
 }
+
+/// Largest alignment table (cells) searched exactly; ~20 MB of costs.
+const MAX_ALIGN_CELLS: usize = 2_500_000;
 
 /// A repeated leaf that isn't fully opaque is made invisible (as Manim does), so stacked
 /// copies don't render darker than the original.

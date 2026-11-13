@@ -57,7 +57,9 @@ pub trait GridMobject: Sized {
     fn get_columns(&self) -> VMobject {
         let rows = self.get_mob_matrix();
         let cols = rows.first().map_or(0, Vec::len);
-        VMobject::group((0..cols).map(|c| VMobject::group(rows.iter().map(|r| r[c].clone()).collect())).collect())
+        VMobject::group(
+            (0..cols).map(|c| VMobject::group(rows.iter().filter_map(|r| r.get(c).cloned()).collect())).collect(),
+        )
     }
 
     /// Every entry (a copy of the entries group).
@@ -76,7 +78,9 @@ pub trait GridMobject: Sized {
     /// The row labels (copies; empty when the table has none).
     fn get_row_labels(&self) -> VMobject {
         let Some(g) = self.grid().filter(|g| g.row_labels) else { return VMobject::group(vec![]) };
-        VMobject::group(self.get_mob_matrix().into_iter().skip(g.col_labels as usize).map(|r| r[0].clone()).collect())
+        VMobject::group(
+            self.get_mob_matrix().into_iter().skip(g.col_labels as usize).filter_map(|r| r.first().cloned()).collect(),
+        )
     }
 
     /// The column labels (copies; empty when the table has none).
@@ -128,8 +132,8 @@ pub trait GridMobject: Sized {
         }
         let rows = self.get_mob_matrix();
         let span = |ms: Vec<&VMobject>| VMobject::group(ms.into_iter().cloned().collect()).bounding_box();
-        let (rlo, rhi) = span(rows[row - 1].iter().collect())?;
-        let (clo, chi) = span(rows.iter().map(|r| &r[col - 1]).collect())?;
+        let (rlo, rhi) = span(rows.get(row - 1)?.iter().collect())?;
+        let (clo, chi) = span(rows.iter().filter_map(|r| r.get(col - 1)).collect())?;
         Some((clo.x - g.h_buff / 2.0, chi.x + g.h_buff / 2.0, rlo.y - g.v_buff / 2.0, rhi.y + g.v_buff / 2.0))
     }
 

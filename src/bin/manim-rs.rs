@@ -109,7 +109,9 @@ fn render_script(args: Vec<String>) -> Result<ExitCode, String> {
     }
     if let Some(i) = rest.iter().position(|a| a == "--timeout") {
         let secs: f64 = rest.get(i + 1).and_then(|s| s.parse().ok()).ok_or("--timeout needs seconds")?;
-        options.timeout = Some(std::time::Duration::from_secs_f64(secs));
+        let t = std::time::Duration::try_from_secs_f64(secs)
+            .map_err(|_| "--timeout needs a non-negative number of seconds")?;
+        options.timeout = Some(t);
         rest.drain(i..=i + 1);
     }
     if !rest.iter().any(|a| matches!(a.as_str(), "-o" | "--output" | "--media_dir")) {
@@ -117,6 +119,10 @@ fn render_script(args: Vec<String>) -> Result<ExitCode, String> {
         rest.push(script_dir.to_string_lossy().into_owned());
     }
     let config = manim::config::Config::parse(rest).map_err(|e| format!("{e:#}"))?;
+    if config.help {
+        println!("{}", manim::config::HELP);
+        return Ok(ExitCode::SUCCESS);
+    }
     match manim::script::render_script(&script, &config, options) {
         Ok(()) => Ok(ExitCode::SUCCESS),
         Err(e) => {

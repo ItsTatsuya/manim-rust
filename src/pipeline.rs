@@ -5,7 +5,9 @@
 //! they leave the scene thread, so waits and static moments are rasterized once.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{sync_channel, SyncSender};
+use std::sync::Arc;
 use std::thread::JoinHandle;
 
 use anyhow::{anyhow, Result};
@@ -43,7 +45,9 @@ enum Mode {
 }
 
 pub struct Pipeline {
-    mode: Mode,
+    mode: Option<Mode>,
+    /// Set to drop the output instead of finishing it (see [`Pipeline::abort`]).
+    abort: Arc<AtomicBool>,
     /// Not yet sent. The last entry is held back so a following identical frame can
     /// bump its repeat count instead of being rendered again.
     pending: Batch,
@@ -54,20 +58,22 @@ pub struct Pipeline {
 impl Pipeline {
     pub fn new(renderer: Box<dyn Renderer>, writer: Option<Box<dyn FrameWriter>>) -> Self {
         let renderer_name = renderer.name();
+        let abort = Arc::new(AtomicBool::new(false));
         let output_description = writer.as_ref().map(|w| w.describe()).unwrap_or_else(|| "last frame only".into());
         let mode = match writer {
             None => Mode::LastOnly { renderer, last: None },
             Some(writer) => {
                 let batch_size = renderer.batch_size();
                 let (tx, rx) = sync_channel::<Batch>(2);
+                let flag = abort.clone();
                 let worker = std::thread::Builder::new()
                     .name("manim-render".into())
-                    .spawn(move || worker(renderer, writer, rx))
+                    .spawn(move || worker(renderer, writer, rx, flag))
                     .expect("spawn render thread");
                 Mode::Streaming { tx: Some(tx), worker: Some(worker), batch_size }
             }
         };
-        Pipeline { mode, pending: Vec::new(), renderer_name, output_description }
+        Pipeline { mode: Some(mode), abort, pending: Vec::new(), renderer_name, output_description }
     }
 
     pub fn renderer_name(&self) -> String {
@@ -79,7 +85,7 @@ impl Pipeline {
     }
 
     pub fn push(&mut self, dl: DisplayList) -> Result<()> {
-        match &mut self.mode {
+        match self.mode.as_mut().expect("pipeline already finished") {
             Mode::LastOnly { last, .. } => {
                 *last = Some(dl);
                 Ok(())
@@ -106,8 +112,8 @@ impl Pipeline {
     }
 
     /// Send everything, wait for the worker and return its state.
-    pub fn finish(self) -> Result<Finished> {
-        match self.mode {
+    pub fn finish(mut self) -> Result<Finished> {
+        match self.mode.take().expect("pipeline already finished") {
             Mode::LastOnly { renderer, last } => Ok(Finished {
                 stats: Stats { frames_written: 0, frames_rasterized: 0, renderer: renderer.name(), output: None },
                 renderer,
@@ -117,13 +123,39 @@ impl Pipeline {
             Mode::Streaming { mut tx, mut worker, .. } => {
                 if let Some(tx) = tx.take() {
                     if !self.pending.is_empty() {
-                        let _ = tx.send(self.pending);
+                        let _ = tx.send(std::mem::take(&mut self.pending));
                     }
                 }
                 let handle = worker.take().expect("worker present");
                 handle.join().map_err(|_| anyhow!("render thread panicked"))?
             }
         }
+    }
+
+    /// Stop without producing output: frames still queued are dropped and the writer
+    /// discards its partial file, so the previous output (if any) stays as it was.
+    /// Returns the worker's own error, if it had one (e.g. ffmpeg exited).
+    pub fn abort(mut self) -> Option<anyhow::Error> {
+        self.stop()
+    }
+
+    fn stop(&mut self) -> Option<anyhow::Error> {
+        if let Some(Mode::Streaming { tx, worker, .. }) = self.mode.take() {
+            self.abort.store(true, Ordering::Relaxed);
+            drop(tx);
+            return match worker?.join() {
+                Ok(r) => r.err(),
+                Err(_) => Some(anyhow!("render thread panicked")),
+            };
+        }
+        None
+    }
+}
+
+impl Drop for Pipeline {
+    /// Dropped without `finish` (an error unwound the scene): treat it as an abort.
+    fn drop(&mut self) {
+        let _ = self.stop();
     }
 }
 
@@ -133,7 +165,9 @@ fn worker(
     mut renderer: Box<dyn Renderer>,
     writer: Box<dyn FrameWriter>,
     rx: std::sync::mpsc::Receiver<Batch>,
+    abort: Arc<AtomicBool>,
 ) -> Result<Finished> {
+    let abort_enc = abort.clone();
     let output = Some(writer.path().to_path_buf()).filter(|p| !p.as_os_str().is_empty());
     let (ftx, frx) = sync_channel::<(std::sync::Arc<Vec<u8>>, u32)>(renderer.batch_size() * 2);
     let encoder = std::thread::Builder::new()
@@ -153,6 +187,10 @@ fn worker(
                 written += n as u64;
             }
             let t_fin = std::time::Instant::now();
+            if abort_enc.load(Ordering::Relaxed) {
+                drop(writer); // discards the partial file
+                return Ok(written);
+            }
             writer.finish()?;
             if trace {
                 eprintln!(
@@ -173,6 +211,9 @@ fn worker(
     let (mut t_wait, mut t_render) = (0.0, 0.0);
     let mut t = std::time::Instant::now();
     for batch in rx {
+        if abort.load(Ordering::Relaxed) {
+            break;
+        }
         t_wait += t.elapsed().as_secs_f64();
         t = std::time::Instant::now();
         let refs: Vec<&DisplayList> = batch.iter().map(|(d, _)| d).collect();

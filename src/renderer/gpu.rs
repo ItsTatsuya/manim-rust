@@ -1,7 +1,7 @@
 //! GPU renderer: lyon tessellates paths (in parallel on the CPU), wgpu rasterizes them
 //! with 4× MSAA into an offscreen texture, and frames are read back in batches.
 
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc, Mutex};
 
 use anyhow::{anyhow, bail, Context, Result};
 use bytemuck::{Pod, Zeroable};
@@ -92,6 +92,10 @@ pub struct GpuRenderer {
     height: u32,
     padded_row: u32,
     label: String,
+    /// Validation errors, out-of-memory and device loss, reported by wgpu's callbacks
+    /// (whose default is to panic). A set error fails every later batch.
+    error: Arc<Mutex<Option<String>>>,
+    max_buffer: u64,
 }
 
 impl GpuRenderer {
@@ -118,11 +122,34 @@ impl GpuRenderer {
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("manim"),
             required_features: wgpu::Features::empty(),
-            required_limits: wgpu::Limits::downlevel_defaults().using_resolution(limits),
+            required_limits: wgpu::Limits {
+                // Readback buffers hold a whole frame: allow what the adapter can do.
+                max_buffer_size: limits.max_buffer_size,
+                ..wgpu::Limits::downlevel_defaults().using_resolution(limits.clone())
+            },
             memory_hints: wgpu::MemoryHints::Performance,
             ..Default::default()
         }))
         .context("could not open GPU device")?;
+
+        let error: Arc<Mutex<Option<String>>> = Arc::default();
+        {
+            let slot = error.clone();
+            device.on_uncaptured_error(Arc::new(move |e: wgpu::Error| {
+                slot.lock().unwrap_or_else(|p| p.into_inner()).get_or_insert_with(|| format!("GPU error: {e}"));
+            }));
+            let slot = error.clone();
+            device.set_device_lost_callback(move |reason, msg| {
+                slot.lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .get_or_insert_with(|| format!("GPU device lost ({reason:?}): {msg}"));
+            });
+        }
+        let max_buffer = device.limits().max_buffer_size;
+        let padded_row = (width * 4).div_ceil(256) * 256;
+        if padded_row as u64 * height as u64 > max_buffer {
+            bail!("{width}x{height} frames exceed the GPU's {} MB buffer limit", max_buffer >> 20);
+        }
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("manim shader"),
@@ -193,7 +220,6 @@ impl GpuRenderer {
             .then(|| tex(samples, wgpu::TextureUsages::RENDER_ATTACHMENT).create_view(&Default::default()));
         let resolve = tex(1, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC);
         let resolve_view = resolve.create_view(&Default::default());
-        let padded_row = (width * 4).div_ceil(256) * 256;
 
         Ok(GpuRenderer {
             label: format!("GPU ({}, {:?}, {}x MSAA)", info.name, info.backend, samples),
@@ -207,7 +233,17 @@ impl GpuRenderer {
             width,
             height,
             padded_row,
+            error,
+            max_buffer,
         })
+    }
+
+    /// The first error wgpu reported, if any.
+    fn check(&self) -> Result<()> {
+        match &*self.error.lock().unwrap_or_else(|p| p.into_inner()) {
+            Some(e) => Err(anyhow!("{e}")),
+            None => Ok(()),
+        }
     }
 
     fn readback(&mut self, i: usize) -> &wgpu::Buffer {
@@ -291,17 +327,41 @@ impl Renderer for GpuRenderer {
                 bail!("frame size {}x{} does not match renderer {}x{}", dl.width, dl.height, self.width, self.height);
             }
         }
+        self.check()?;
         let mut out = Vec::with_capacity(frames.len());
         let mut in_flight: Option<InFlight> = None;
-        for (k, chunk) in frames.chunks(CHUNK).enumerate() {
-            let geoms: Vec<_> = chunk.par_iter().map(|dl| tessellate(dl)).collect();
-            let next = self.submit_chunk(chunk, &geoms, (k % 2) * CHUNK)?;
-            if let Some(prev) = in_flight.replace(next) {
+        let result = (|| -> Result<()> {
+            for (k, chunk) in frames.chunks(CHUNK).enumerate() {
+                let geoms: Vec<_> = chunk.par_iter().map(|dl| tessellate(dl)).collect();
+                let too_big = geoms.iter().any(|g| {
+                    (g.vertices.len() * std::mem::size_of::<Vertex>()) as u64 > self.max_buffer
+                        || (g.indices.len() * 4) as u64 > self.max_buffer
+                });
+                if too_big {
+                    // Geometry past the GPU's buffer limit: rasterize this chunk on the CPU.
+                    if let Some(prev) = in_flight.take() {
+                        out.extend(self.collect(prev)?);
+                    }
+                    out.extend(chunk.par_iter().map(|f| super::cpu::rasterize(f)).collect::<Vec<_>>());
+                    continue;
+                }
+                let next = self.submit_chunk(chunk, &geoms, (k % 2) * CHUNK)?;
+                self.check()?;
+                if let Some(prev) = in_flight.replace(next) {
+                    out.extend(self.collect(prev)?);
+                }
+            }
+            if let Some(prev) = in_flight.take() {
                 out.extend(self.collect(prev)?);
             }
-        }
-        if let Some(prev) = in_flight {
-            out.extend(self.collect(prev)?);
+            self.check()
+        })();
+        if let Err(e) = result {
+            // Leave no buffer mapped or pending, so a later batch can reuse them.
+            if let Some(f) = in_flight.take() {
+                self.release(&f);
+            }
+            return Err(e);
         }
         Ok(out)
     }
@@ -315,12 +375,28 @@ struct InFlight {
 }
 
 impl GpuRenderer {
+    /// Wait for a chunk and unmap its buffers, discarding the frames.
+    fn release(&self, f: &InFlight) {
+        let _ = self.device.poll(wgpu::PollType::Wait { submission_index: Some(f.submission.clone()), timeout: None });
+        for buf in &self.readbacks[f.first_buffer..f.first_buffer + f.count] {
+            buf.unmap();
+        }
+    }
+
     fn collect(&mut self, f: InFlight) -> Result<Vec<Vec<u8>>> {
-        self.device
-            .poll(wgpu::PollType::Wait { submission_index: Some(f.submission), timeout: None })
-            .context("waiting for the GPU")?;
-        for _ in 0..f.count {
-            f.rx.recv().context("GPU readback channel closed")?.context("GPU readback failed")?;
+        let waited = self
+            .device
+            .poll(wgpu::PollType::Wait { submission_index: Some(f.submission.clone()), timeout: None })
+            .context("waiting for the GPU")
+            .and_then(|_| {
+                for _ in 0..f.count {
+                    f.rx.recv().context("GPU readback channel closed")?.context("GPU readback failed")?;
+                }
+                Ok(())
+            });
+        if let Err(e) = waited {
+            self.release(&f);
+            return Err(e);
         }
         let row = (self.width * 4) as usize;
         let mut out = Vec::with_capacity(f.count);

@@ -15,7 +15,6 @@
 
 use std::ops::{Index, IndexMut};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -87,7 +86,28 @@ struct Segment {
     frames: usize,
     anim: Option<AnimationGroup>,
     world: World,
+    view: CameraView,
     updaters: Vec<UpdaterId>,
+}
+
+/// The parts of the camera a scene can change mid-timeline; recorded with each keyframe so
+/// seeking shows the same framing and background as the exported video.
+#[derive(Clone, Copy)]
+struct CameraView {
+    frame_height: f64,
+    frame_center: crate::constants::Point,
+    background: crate::color::Color,
+}
+
+impl CameraView {
+    fn of(c: &Camera) -> Self {
+        CameraView { frame_height: c.frame_height, frame_center: c.frame_center, background: c.background }
+    }
+    fn apply(self, c: &mut Camera) {
+        c.frame_height = self.frame_height;
+        c.frame_center = self.frame_center;
+        c.background = self.background;
+    }
 }
 
 /// A `play`/`wait` in progress (see [`Scene::begin_play`]).
@@ -126,6 +146,12 @@ impl Playback {
     }
 }
 
+/// A scene being built and rendered.
+///
+/// Not `Send`: updaters and `.animate` targets hold non-thread-safe closures and `Rc`s, so
+/// build, play and seek a scene on one thread (a host keeps it on a dedicated worker and
+/// talks to it over a channel). Default styles set by [`Scene::set_theme`] are
+/// thread-local and reset by [`Scene::new`], so build mobjects on that same thread.
 pub struct Scene {
     name: String,
     world: World,
@@ -144,7 +170,7 @@ pub struct Scene {
     sounds: Vec<Sound>,
     play_log: Vec<PlayInfo>,
     segments: Vec<Segment>,
-    end_state: Option<(World, f64)>,
+    end_state: Option<(World, f64, CameraView)>,
     checker: Option<Checker>,
     pending_snapshot_times: Vec<f64>,
     snapshots_taken: usize,
@@ -197,6 +223,10 @@ pub fn render_with(config: &Config, name: &str, construct: impl FnOnce(&mut Scen
 
 impl Scene {
     pub fn new(config: &Config, name: &str) -> Result<Self> {
+        config.validate()?;
+        if let Some(p) = &config.ffmpeg {
+            output::set_ffmpeg_path(p);
+        }
         let setup = Instant::now();
         let events = Events::new(config.progress);
         // GPU device creation, encoder probing (spawns ffmpeg) and system font loading are
@@ -367,6 +397,11 @@ impl Scene {
     }
 
     /// Elapsed scene time in seconds.
+    /// Whether the render was cancelled or passed its deadline (see [`Config::deadline`]).
+    pub fn is_interrupted(&self) -> bool {
+        self.config.interrupted()
+    }
+
     pub fn time(&self) -> f64 {
         self.time
     }
@@ -537,6 +572,16 @@ impl Scene {
     }
 
     fn push_sound(&mut self, s: Sound) {
+        if !s.start.is_finite() || !s.gain.is_finite() || s.gain < 0.0 {
+            self.error.get_or_insert_with(|| {
+                anyhow!("sound needs a finite start time and a non-negative gain (got {} and {})", s.start, s.gain)
+            });
+            return;
+        }
+        if let AudioSource::Samples { sample_rate: 0, .. } = s.source {
+            self.error.get_or_insert_with(|| anyhow!("sound samples need a sample rate above 0"));
+            return;
+        }
         let info = SoundInfo::from(&s);
         self.events.emit("sound", json!(info), || None);
         self.sounds.push(s);
@@ -617,7 +662,7 @@ impl Scene {
         if self.error.is_some() {
             return;
         }
-        if self.config.cancel.as_ref().is_some_and(|c| c.load(Ordering::Relaxed)) {
+        if self.config.interrupted() {
             self.error = Some(anyhow!("render cancelled"));
             return;
         }
@@ -649,9 +694,14 @@ impl Scene {
     /// Start a `play` to drive frame by frame:
     /// `while let Some(dt) = s.step(&mut p) { /* own per-frame code */ s.end_frame(&p, dt) }`.
     pub fn begin_play(&mut self, anims: impl IntoAnimations) -> Playback {
+        self.leave_seek();
         let mut group = AnimationGroup::new(anims);
         group.resolve(&self.world);
-        let run_time = group.config().run_time.max(0.0);
+        let mut run_time = group.config().run_time.max(0.0);
+        if !run_time.is_finite() {
+            self.error.get_or_insert_with(|| anyhow!("play: run_time must be finite (got {run_time})"));
+            run_time = 0.0;
+        }
         // Same count as Manim CE (frames at t = 0, dt, ... < run_time).
         let frames = (run_time * self.config.fps - 1e-6).ceil().max(0.0) as usize;
         let index = self.play_log.len();
@@ -662,6 +712,7 @@ impl Scene {
                 frames,
                 anim: Some(group.clone()),
                 world: self.world.clone(),
+                view: CameraView::of(&self.camera),
                 updaters: self.active_updaters(),
             });
         }
@@ -688,7 +739,12 @@ impl Scene {
     }
 
     /// Start a `wait` to drive frame by frame (see [`Scene::begin_play`]).
-    pub fn begin_wait(&mut self, seconds: f64) -> Playback {
+    pub fn begin_wait(&mut self, mut seconds: f64) -> Playback {
+        self.leave_seek();
+        if !seconds.is_finite() {
+            self.error.get_or_insert_with(|| anyhow!("wait: duration must be finite (got {seconds})"));
+            seconds = 0.0;
+        }
         // Manim CE renders waits as floor(seconds · fps) frames.
         let frames = (seconds.max(0.0) * self.config.fps + 1e-6).floor() as usize;
         let index = self.play_log.len();
@@ -698,6 +754,7 @@ impl Scene {
                 frames,
                 anim: None,
                 world: self.world.clone(),
+                view: CameraView::of(&self.camera),
                 updaters: self.active_updaters(),
             });
         }
@@ -725,6 +782,12 @@ impl Scene {
     /// the play has finished (the animation is then cleaned up).
     pub fn step(&mut self, p: &mut Playback) -> Option<f64> {
         if p.finished {
+            return None;
+        }
+        if self.config.interrupted() {
+            // Cancelled or out of time: stop here, even mid-replay.
+            self.error.get_or_insert_with(|| anyhow!("render cancelled"));
+            p.finished = true;
             return None;
         }
         let failed = self.error.is_some() && !p.replay;
@@ -787,6 +850,8 @@ impl Scene {
             return;
         }
         if let Some(c) = &mut self.checker {
+            let cam = &self.camera;
+            c.set_frame(cam.frame_width(), cam.frame_height, [cam.frame_center.x, cam.frame_center.y]);
             let new = c.settled(&self.world, self.time, Some(p.play_index));
             self.report_problems(new);
         }
@@ -813,7 +878,7 @@ impl Scene {
             bail!("seeking needs Config::record (--record)");
         }
         if self.end_state.is_none() {
-            self.end_state = Some((self.world.clone(), self.time));
+            self.end_state = Some((self.world.clone(), self.time, CameraView::of(&self.camera)));
         }
         let t = t.clamp(0.0, self.duration);
         let dt = 1.0 / self.config.fps;
@@ -834,20 +899,23 @@ impl Scene {
             if let Some(s) = self.segments.first() {
                 self.world = s.world.clone();
                 self.time = s.start;
+                s.view.apply(&mut self.camera);
             }
             return Ok(done(0));
         };
         let s = &self.segments[k];
         let end = s.start + s.frames as f64 * dt;
         if t >= end - 1e-9 && k + 1 == self.segments.len() {
-            let (w, time) = self.end_state.clone().unwrap();
+            let (w, time, view) = self.end_state.clone().unwrap();
             self.world = w;
             self.time = time;
+            view.apply(&mut self.camera);
             return Ok(done(0));
         }
         let stop = (((t - s.start) / dt) + 1e-6).floor().clamp(0.0, s.frames as f64) as usize;
         self.world = s.world.clone();
         self.time = s.start;
+        s.view.apply(&mut self.camera);
         let mut anim = s.anim.clone();
         if stop > 0 {
             if let Some(a) = &mut anim {
@@ -867,6 +935,16 @@ impl Scene {
             play_index: k,
             finished: false,
         })
+    }
+
+    /// Back to the end of the timeline after a seek, so further plays continue from where
+    /// construction left off rather than from the seeked-to moment.
+    fn leave_seek(&mut self) {
+        if let Some((w, time, view)) = self.end_state.take() {
+            self.world = w;
+            self.time = time;
+            view.apply(&mut self.camera);
+        }
     }
 
     /// Jump to time `t` (needs [`Config::record`]): the world becomes what frame `t` shows.
@@ -895,11 +973,13 @@ impl Scene {
         if self.config.snapshots.contains(&SnapshotAt::End) {
             self.snapshot("end");
         }
-        let fin = self.pipeline.take().map(|p| p.finish());
         if let Some(e) = self.error.take() {
+            // Failed or cancelled: discard the half-written output, keep any previous one.
             // The worker's error (e.g. ffmpeg died) is usually the real cause.
-            return Err(fin.and_then(|r| r.err()).unwrap_or(e));
+            let worker_err = self.pipeline.take().and_then(|p| p.abort());
+            return Err(worker_err.unwrap_or(e));
         }
+        let fin = self.pipeline.take().map(|p| p.finish());
         let mut outputs: Vec<PathBuf> = Vec::new();
         let (mut written, mut rasterized, mut renderer_name) = (0, 0, String::from("none"));
         if let Some(fin) = fin {

@@ -31,7 +31,7 @@ use crate::world::MobjectId;
 
 #[derive(Clone, Debug)]
 #[allow(clippy::large_enum_variant)] // most slots are detached values; boxing them costs more
-enum Slot {
+pub(crate) enum Slot {
     Free,
     Detached(VMobject),
     Attached(MobjectId),
@@ -63,6 +63,35 @@ thread_local! {
 
 pub(crate) fn with_state<R>(f: impl FnOnce(&mut State) -> R) -> R {
     STATE.with(|s| f(&mut s.borrow_mut()))
+}
+
+impl State {
+    /// The handle table as it stands (taken after a script's top level has run).
+    pub(crate) fn handles(&self) -> Vec<Slot> {
+        self.slots.clone()
+    }
+
+    /// Start a run from the handle table `initial`: handles from an earlier run (whose ids
+    /// pointed into an older world) must not alias mobjects of the new one.
+    pub(crate) fn reset_for_run(&mut self, initial: &[Slot]) {
+        self.slots = initial.to_vec();
+        self.by_id.clear();
+        self.playbacks.clear();
+    }
+}
+
+/// Run `f` with `host` as the thread's script state, so several loaded scripts on one
+/// thread never see each other's scenes, handles or sandbox.
+pub(crate) fn with_host_state<R>(host: &RefCell<State>, f: impl FnOnce() -> R) -> R {
+    struct Swap<'a>(&'a RefCell<State>);
+    impl Drop for Swap<'_> {
+        fn drop(&mut self) {
+            STATE.with(|s| std::mem::swap(&mut *s.borrow_mut(), &mut *self.0.borrow_mut()));
+        }
+    }
+    STATE.with(|s| std::mem::swap(&mut *s.borrow_mut(), &mut *host.borrow_mut()));
+    let _restore = Swap(host);
+    f()
 }
 
 fn scene(st: &mut State) -> Result<&mut Scene> {
@@ -180,16 +209,41 @@ enum Base {
 }
 
 fn resolve(st: &State, h: u32) -> Result<(Base, Vec<usize>)> {
-    match slot(st, h)? {
-        Slot::Detached(_) => Ok((Base::Detached(h), Vec::new())),
-        Slot::Attached(id) => Ok((Base::World(id), Vec::new())),
-        Slot::View { root, path } => {
-            let (base, mut p) = resolve(st, root)?;
-            p.extend(path);
-            Ok((base, p))
+    // Walk up the view chain iteratively (a cycle must never overflow the host's stack).
+    let mut paths: Vec<Vec<usize>> = Vec::new();
+    let mut cur = h;
+    loop {
+        if paths.len() > st.slots.len() {
+            bail!("mobject handle {h} is part of a group cycle");
         }
-        Slot::Free => unreachable!(),
+        let base = match slot(st, cur)? {
+            Slot::Detached(_) => Base::Detached(cur),
+            Slot::Attached(id) => Base::World(id),
+            Slot::View { root, path } => {
+                paths.push(path);
+                cur = root;
+                continue;
+            }
+            Slot::Free => bail!("mobject handle {cur} was freed"),
+        };
+        let p = paths.into_iter().rev().flatten().collect();
+        return Ok((base, p));
     }
+}
+
+/// Whether `ancestor` is `h` or one of the groups `h` sits in.
+fn is_self_or_ancestor(st: &State, h: u32, ancestor: u32) -> Result<bool> {
+    let mut cur = h;
+    for _ in 0..=st.slots.len() {
+        if cur == ancestor {
+            return Ok(true);
+        }
+        match slot(st, cur)? {
+            Slot::View { root, .. } => cur = root,
+            _ => return Ok(false),
+        }
+    }
+    bail!("mobject handle {h} is part of a group cycle")
 }
 
 fn walk<'a>(mut m: &'a mut VMobject, path: &[usize]) -> Result<&'a mut VMobject> {
@@ -376,7 +430,7 @@ fn apply_op(m: VMobject, name: &str, args: &[Value], refs: &Refs) -> Result<VMob
                 None => m.scale(f),
             }
         }
-        "stretch" => m.stretch(arg_num(args, 0, 1.0), arg_num(args, 1, 0.0) as usize),
+        "stretch" => m.stretch(arg_num(args, 0, 1.0), count(arg_num(args, 1, 0.0), 0, 3)),
         "rotate" => {
             let a = arg_num(args, 0, 0.0);
             match point(arg(args, 1)) {
@@ -413,7 +467,9 @@ fn apply_op(m: VMobject, name: &str, args: &[Value], refs: &Refs) -> Result<VMob
                 None => m.arrange_buff(dir, buff),
             }
         }
-        "arrangeInGrid" => m.arrange_in_grid(arg_num(args, 0, 3.0).max(1.0) as usize, arg_num(args, 1, MED_SMALL_BUFF)),
+        "arrangeInGrid" => {
+            m.arrange_in_grid(count(arg_num(args, 0, 3.0), 1, 100_000), arg_num(args, 1, MED_SMALL_BUFF))
+        }
         "setColor" => m.set_color(arg_color(args, 0, "setColor")?),
         "setFill" => {
             let c = color(arg(args, 0));
@@ -467,8 +523,8 @@ fn apply_op(m: VMobject, name: &str, args: &[Value], refs: &Refs) -> Result<VMob
             m.set_color_text(needle, arg_color(args, 1, "setColorText")?)
         }
         "setColorChars" => m.set_color_chars(
-            arg_num(args, 0, 0.0) as usize,
-            arg_num(args, 1, 0.0) as usize,
+            count(arg_num(args, 0, 0.0), 0, usize::MAX),
+            count(arg_num(args, 1, 0.0), 0, usize::MAX),
             arg_color(args, 2, "setColorChars")?,
         ),
         "fitWithin" => m.fit_within(
@@ -519,7 +575,7 @@ fn apply_op(m: VMobject, name: &str, args: &[Value], refs: &Refs) -> Result<VMob
             }
             m
         }
-        "insertCurves" => m.insert_curves(arg_num(args, 0, 2.0).max(1.0) as usize),
+        "insertCurves" => m.insert_curves(count(arg_num(args, 0, 2.0), 1, 10_000)),
         "setKind" => m.with_kind(arg(args, 0).as_str().unwrap_or("VMobject")),
         "setLabel" => m.with_label(arg(args, 0).as_str().unwrap_or("")),
         "setRowColors" => m.set_row_colors(&colors_arg(arg(args, 0))?),
@@ -753,9 +809,9 @@ fn make(st: &mut State, kind: &str, o: &Value, refs: &Refs) -> Result<VMobject> 
         "Sector" => Sector::new(n("radius", 1.0), n("startAngle", 0.0), n("angle", PI / 2.0)),
         "Polygon" => Polygon::new(&points_arg(o, "points")?),
         "Polyline" => Polyline::new(&points_arg(o, "points")?),
-        "RegularPolygon" => RegularPolygon::with_radius(n("n", 6.0) as usize, n("radius", 1.0)),
+        "RegularPolygon" => RegularPolygon::with_radius(count(n("n", 6.0), 3, 10_000), n("radius", 1.0)),
         "Triangle" => Triangle::new(),
-        "Star" => Star::new(n("n", 5.0) as usize, n("outerRadius", 1.0), n("innerRadius", 0.4)),
+        "Star" => Star::new(count(n("n", 5.0), 2, 10_000), n("outerRadius", 1.0), n("innerRadius", 0.4)),
         "SurroundingRectangle" => {
             let t = target("target")?;
             match opt_num(o, "cornerRadius") {
@@ -773,7 +829,7 @@ fn make(st: &mut State, kind: &str, o: &Value, refs: &Refs) -> Result<VMobject> 
             let s = o.get("text").and_then(Value::as_str).unwrap_or("");
             Text::markup(s, text_style(st, o)?)?
         }
-        "DecimalNumber" => DecimalNumber::styled(n("value", 0.0), n("decimals", 2.0) as usize, text_style(st, o)?),
+        "DecimalNumber" => DecimalNumber::styled(n("value", 0.0), count(n("decimals", 2.0), 0, 20), text_style(st, o)?),
         "Integer" => {
             let v = n("value", 0.0).round();
             DecimalNumber::styled(v, 0, text_style(st, o)?).with_kind("Integer")
@@ -915,7 +971,7 @@ fn grid_entry(st: &mut State, kind: &str, v: &Value, refs: &Refs, cfg: &Value) -
     Ok(match kind {
         "IntegerTable" | "IntegerMatrix" => DecimalNumber::styled(number()?.round(), 0, numbers()).with_kind("Integer"),
         "DecimalTable" | "DecimalMatrix" => {
-            let places = opt_num(cfg, "numDecimalPlaces").unwrap_or(1.0).max(0.0) as usize;
+            let places = count(opt_num(cfg, "numDecimalPlaces").unwrap_or(1.0), 0, 20);
             DecimalNumber::styled(number()?, places, numbers())
         }
         "MobjectTable" | "MobjectMatrix" => bail!("{kind} entries must be mobjects, got {v}"),
@@ -1024,11 +1080,11 @@ fn code(st: &mut State, o: &Value) -> Result<VMobject> {
         c = c.style(s);
     }
     if let Some(n) = opt_num(o, "tabWidth") {
-        c = c.tab_width(n.max(0.0) as usize);
+        c = c.tab_width(count(n, 0, 64));
     }
     c = c.line_numbers(flag(o, "addLineNumbers", true));
     if let Some(n) = opt_num(o, "lineNumbersFrom") {
-        c = c.line_numbers_from(n.max(0.0) as usize);
+        c = c.line_numbers_from(count(n, 0, usize::MAX / 2));
     }
     c = c.background(match o.get("background").and_then(Value::as_str).unwrap_or("rectangle") {
         "rectangle" | "rect" => CodeBackground::Rectangle,
@@ -1343,7 +1399,7 @@ macro_rules! reg {
     ($ctx:expr, $obj:expr, $name:literal, || $body:expr) => {{
         let f = Function::new($ctx.clone(), move |ctx: Ctx<'_>| -> rquickjs::Result<_> {
             let run = || $body;
-            let r: Result<_> = run();
+            let r: Result<_> = guard($name, run);
             r.map_err(|e| throw(&ctx, e))
         })?;
         $obj.set($name, f)?;
@@ -1351,11 +1407,38 @@ macro_rules! reg {
     ($ctx:expr, $obj:expr, $name:literal, |$($a:ident : $t:ty),*| $body:expr) => {{
         let f = Function::new($ctx.clone(), move |ctx: Ctx<'_>, $($a: $t),*| -> rquickjs::Result<_> {
             let run = || $body;
-            let r: Result<_> = run();
+            let r: Result<_> = guard($name, run);
             r.map_err(|e| throw(&ctx, e))
         })?;
         $obj.set($name, f)?;
     }};
+}
+
+/// Run a native call, turning a Rust panic into a script error instead of unwinding
+/// into QuickJS and the host application.
+fn guard<T>(name: &str, f: impl FnOnce() -> Result<T>) -> Result<T> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(r) => r,
+        Err(p) => {
+            let msg = p
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| p.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "unknown panic".into());
+            Err(anyhow!("internal error in {name}: {msg}"))
+        }
+    }
+}
+
+/// A count from a script, clamped to `lo..=hi` (NaN and negatives become `lo`).
+fn count(x: f64, lo: usize, hi: usize) -> usize {
+    if x.is_nan() || x < lo as f64 {
+        lo
+    } else if x > hi as f64 {
+        hi
+    } else {
+        x as usize
+    }
 }
 
 pub(crate) fn install(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
@@ -1433,6 +1516,11 @@ pub(crate) fn install(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
         let hs: Vec<u32> = serde_json::from_str(&handles).context("handles")?;
         with_state(|st| {
             let base = with_mob(st, h, |m| m.children.len())?;
+            for &c in &hs {
+                if is_self_or_ancestor(st, h, c)? {
+                    bail!("cannot add a group to itself or to one of its own members");
+                }
+            }
             for (k, &c) in hs.iter().enumerate() {
                 let m = get_mob(st, c)?;
                 if let Slot::Attached(id) = slot(st, c)? {
@@ -1678,6 +1766,9 @@ pub(crate) fn install(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
         let s = scene(st)?;
         while let Some(dt) = s.step(&mut pb) {
             s.end_frame(&pb, dt);
+        }
+        if s.is_interrupted() {
+            bail!("stopped: cancelled or out of time");
         }
         if !pb.is_replay() {
             push_back(st, pops)?;

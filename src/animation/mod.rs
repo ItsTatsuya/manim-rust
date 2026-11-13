@@ -290,7 +290,11 @@ impl Animation for AnimationGroup {
             self.resolve(w);
         }
         for i in 0..self.anims.len() {
-            if self.timings[i].0 <= 0.0 {
+            let (s, e) = self.timings[i];
+            if e <= 0.0 {
+                // Zero-length child: complete it now so later children begin from its result.
+                self.finish_child(i, w);
+            } else if s <= 0.0 {
                 self.start_child(i, w);
             }
         }

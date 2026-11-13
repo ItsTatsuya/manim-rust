@@ -491,3 +491,104 @@ export default class T extends Scene {
     let shown = host.with_scene(|s| s.inspect().len()).unwrap();
     assert_eq!(shown, 3, "\"two\", \"done\" and \"!\" remain; the unwritten, removed and untyped text is gone");
 }
+
+#[test]
+fn group_cycles_are_errors_not_stack_overflows() {
+    let d = dir("cycle");
+    let p = write(
+        &d,
+        "cycle.ts",
+        r##"
+import { Scene, VGroup, Circle, Square, RIGHT } from "manim";
+export class SelfAdd extends Scene {
+  construct(): void {
+    const g = VGroup(Circle());
+    g.add(g);
+    g.shift(RIGHT);
+  }
+}
+export class Mutual extends Scene {
+  construct(): void {
+    const a = VGroup(Circle());
+    const b = VGroup(Square());
+    a.add(b);
+    b.add(a);
+  }
+}
+"##,
+    );
+    let host = ScriptHost::load(&p, HostOptions::default()).unwrap();
+    for scene in ["SelfAdd", "Mutual"] {
+        let e = host.run(scene, &cfg()).unwrap_err();
+        assert!(format!("{e:#}").contains("itself"), "{scene}: {e:#}");
+    }
+}
+
+#[test]
+fn native_panics_and_huge_counts_become_script_errors() {
+    let d = dir("panics");
+    let p = write(
+        &d,
+        "panics.ts",
+        r##"
+import { Scene, Circle, RegularPolygon } from "manim";
+export default class P extends Scene {
+  construct(): void {
+    this.add(Circle().stretch(2, 5));
+    this.add(RegularPolygon({ n: 1e10 }));
+  }
+}
+"##,
+    );
+    let host = ScriptHost::load(&p, HostOptions::default()).unwrap();
+    host.run("P", &cfg()).unwrap();
+}
+
+#[test]
+fn runs_and_hosts_do_not_share_handles_or_scenes() {
+    let d = dir("isolation");
+    let p = write(
+        &d,
+        "iso.ts",
+        r##"
+import { Scene, Circle, Square, FadeIn } from "manim";
+const shared = Circle();
+export class A extends Scene {
+  construct(): void { this.play(FadeIn(shared)); }
+}
+export class B extends Scene {
+  construct(): void { this.add(Square()); this.play(FadeIn(shared)); }
+}
+"##,
+    );
+    let host = ScriptHost::load(&p, HostOptions::default()).unwrap();
+    host.run("A", &cfg()).unwrap();
+    host.run("B", &cfg()).unwrap();
+    assert_eq!(host.with_scene(|s| s.mobjects().len()), Some(2));
+
+    let other = ScriptHost::load(&p, HostOptions::default()).unwrap();
+    other.run("A", &cfg()).unwrap();
+    // Each host keeps its own scene.
+    assert_eq!(host.with_scene(|s| s.mobjects().len()), Some(2));
+    assert_eq!(other.with_scene(|s| s.mobjects().len()), Some(1));
+}
+
+#[test]
+fn timeout_stops_long_native_waits() {
+    let d = dir("timeout");
+    let p = write(
+        &d,
+        "slow.ts",
+        r##"
+import { Scene, Dot } from "manim";
+export default class Slow extends Scene {
+  construct(): void { this.add(Dot()); this.wait(1e7); }
+}
+"##,
+    );
+    let host =
+        ScriptHost::load(&p, HostOptions { timeout: Some(Duration::from_millis(300)), ..Default::default() }).unwrap();
+    let t = std::time::Instant::now();
+    assert!(host.run("Slow", &cfg()).is_err());
+    assert!(t.elapsed() < Duration::from_secs(10), "took {:?}", t.elapsed());
+}

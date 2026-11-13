@@ -145,6 +145,7 @@ pub struct Problem {
 pub struct Checker {
     frame_width: f64,
     frame_height: f64,
+    frame_center: [f64; 2],
     /// How much of the smaller box must be covered to count as overlapping.
     pub min_overlap: f64,
     /// How far (scene units) text may poke past the frame edge.
@@ -158,6 +159,7 @@ impl Checker {
         Checker {
             frame_width,
             frame_height,
+            frame_center: [0.0, 0.0],
             min_overlap: 0.08,
             edge_tolerance: 0.02,
             problems: Vec::new(),
@@ -177,6 +179,13 @@ impl Checker {
         } else {
             None
         }
+    }
+
+    /// Follow the camera: offscreen checks use this frame (scene units).
+    pub fn set_frame(&mut self, width: f64, height: f64, center: [f64; 2]) {
+        self.frame_width = width;
+        self.frame_height = height;
+        self.frame_center = center;
     }
 
     /// State after a play finished. Returns the new problems.
@@ -201,6 +210,8 @@ impl Checker {
             let (hw, hh) =
                 (self.frame_width / 2.0 + self.edge_tolerance, self.frame_height / 2.0 + self.edge_tolerance);
             let [l, bo, r, t] = a.bbox;
+            let [cx, cy] = self.frame_center;
+            let (l, r, bo, t) = (l - cx, r - cx, bo - cy, t - cy);
             if l < -hw || r > hw || bo < -hh || t > hh {
                 let p = Problem {
                     kind: "offscreen".into(),

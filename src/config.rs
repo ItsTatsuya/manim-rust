@@ -88,8 +88,45 @@ pub struct Config {
     pub scene_filter: Option<String>,
     /// Print scene names instead of rendering.
     pub list_scenes: bool,
+    /// `-h`/`--help` was given; the caller should print [`HELP`] instead of rendering.
+    pub help: bool,
     /// Set to true from another thread to stop the render (it returns an error).
     pub cancel: Option<Arc<AtomicBool>>,
+    /// Stop the render (it returns an error) once this moment passes; settable from any
+    /// thread. Checked every frame, so long `play`/`wait` calls stop too.
+    pub deadline: Option<Deadline>,
+    /// ffmpeg executable to use (otherwise `MANIM_FFMPEG`, PATH, then winget's folder).
+    pub ffmpeg: Option<PathBuf>,
+}
+
+/// A shared, adjustable time limit (see [`Config::deadline`]).
+pub type Deadline = Arc<std::sync::Mutex<Option<std::time::Instant>>>;
+
+/// Largest frame side accepted (16K); bigger frames would exhaust memory long before encoding.
+pub const MAX_FRAME_SIDE: u32 = 16384;
+
+impl Config {
+    /// Check values a host may have set directly (the CLI parser calls this too).
+    pub fn validate(&self) -> Result<()> {
+        if self.pixel_width == 0 || self.pixel_height == 0 {
+            bail!("resolution must be positive (got {}x{})", self.pixel_width, self.pixel_height);
+        }
+        if self.pixel_width > MAX_FRAME_SIDE || self.pixel_height > MAX_FRAME_SIDE {
+            bail!("resolution {}x{} is above the {MAX_FRAME_SIDE}px limit", self.pixel_width, self.pixel_height);
+        }
+        if !(self.fps.is_finite() && self.fps > 0.0 && self.fps <= 1000.0) {
+            bail!("fps must be a number between 0 and 1000 (got {})", self.fps);
+        }
+        Ok(())
+    }
+
+    /// Whether the render was cancelled or ran past its deadline.
+    pub fn interrupted(&self) -> bool {
+        self.cancel.as_ref().is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed))
+            || self.deadline.as_ref().is_some_and(|d| {
+                d.lock().unwrap_or_else(|e| e.into_inner()).is_some_and(|t| std::time::Instant::now() > t)
+            })
+    }
 }
 
 /// When to save a snapshot.
@@ -145,7 +182,10 @@ impl Default for Config {
             theme: None,
             scene_filter: None,
             list_scenes: false,
+            help: false,
             cancel: None,
+            deadline: None,
+            ffmpeg: None,
         }
     }
 }
@@ -192,9 +232,16 @@ impl Config {
         self
     }
 
-    /// Parse the process arguments.
+    /// Parse the process arguments. For a scene binary's `main`: on `--help` this prints
+    /// the usage and exits the process. Hosts embedding the library use [`Config::parse`]
+    /// or build a `Config` directly instead.
     pub fn from_args() -> Result<Self> {
-        Self::parse(std::env::args().skip(1))
+        let c = Self::parse(std::env::args().skip(1))?;
+        if c.help {
+            println!("{HELP}");
+            std::process::exit(0);
+        }
+        Ok(c)
     }
 
     pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Self> {
@@ -222,7 +269,7 @@ impl Config {
                 "--media_dir" => c.media_dir = PathBuf::from(val("--media_dir")?),
                 "-o" | "--output" => c.output = Some(PathBuf::from(val("--output")?)),
                 // Picked up by output::find_ffmpeg before any writer is created.
-                "--ffmpeg" => std::env::set_var("MANIM_FFMPEG", val("--ffmpeg")?),
+                "--ffmpeg" => c.ffmpeg = Some(PathBuf::from(val("--ffmpeg")?)),
                 "--gpu-info" => c.gpu_info = true,
                 "-q" | "--quiet" => c.quiet = true,
                 "--progress" => c.progress = val("--progress")?.parse()?,
@@ -245,16 +292,11 @@ impl Config {
                 }
                 "--scene" => c.scene_filter = Some(val("--scene")?),
                 "--list-scenes" => c.list_scenes = true,
-                "-h" | "--help" => {
-                    println!("{HELP}");
-                    std::process::exit(0);
-                }
+                "-h" | "--help" => c.help = true,
                 other => bail!("unknown option '{other}'\n\n{HELP}"),
             }
         }
-        if c.pixel_width == 0 || c.pixel_height == 0 || c.fps <= 0.0 {
-            bail!("resolution and fps must be positive");
-        }
+        c.validate()?;
         if c.check && c.snapshots.is_empty() {
             c.dry_run = true;
         }

@@ -54,11 +54,32 @@ pub fn parse(data: &[u8], scale: f64) -> Result<VMobject> {
 
 fn load(data: &[u8]) -> Result<usvg::Tree> {
     let mut opt = usvg::Options::default();
-    // Only pay for the system font scan when the SVG actually has text.
+    // Only pay for the system font scan when the SVG actually has text, and only once.
     if data.windows(5).any(|w| w == b"<text") {
-        opt.fontdb_mut().load_system_fonts();
+        opt.fontdb = svg_fonts();
     }
     usvg::Tree::from_data(data, &opt).context("parsing SVG")
+}
+
+static SVG_FONTS: std::sync::Mutex<Option<std::sync::Arc<usvg::fontdb::Database>>> = std::sync::Mutex::new(None);
+
+/// System fonts plus fonts registered through `text::register_font_*`, scanned once.
+fn svg_fonts() -> std::sync::Arc<usvg::fontdb::Database> {
+    let mut g = SVG_FONTS.lock().unwrap_or_else(|e| e.into_inner());
+    g.get_or_insert_with(|| {
+        let mut db = usvg::fontdb::Database::new();
+        db.load_system_fonts();
+        std::sync::Arc::new(db)
+    })
+    .clone()
+}
+
+/// Make a registered font available to SVG `<text>` too.
+#[allow(dead_code)]
+pub(crate) fn register_font_data(bytes: Vec<u8>) {
+    let mut db = svg_fonts();
+    std::sync::Arc::make_mut(&mut db).load_font_data(bytes);
+    *SVG_FONTS.lock().unwrap_or_else(|e| e.into_inner()) = Some(db);
 }
 
 fn from_tree(tree: &usvg::Tree, scale: f64) -> VMobject {
@@ -172,6 +193,14 @@ fn path(p: &usvg::Path, scale: f64, opacity: f64) -> Option<VMobject> {
         m.stroke_color = m.fill_color;
     }
     Some(m)
+}
+
+/// Make a registered font folder available to SVG `<text>` too.
+#[allow(dead_code)]
+pub(crate) fn register_font_dir(path: &std::path::Path) {
+    let mut db = svg_fonts();
+    std::sync::Arc::make_mut(&mut db).load_fonts_dir(path);
+    *SVG_FONTS.lock().unwrap_or_else(|e| e.into_inner()) = Some(db);
 }
 
 #[cfg(test)]

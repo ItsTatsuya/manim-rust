@@ -101,12 +101,16 @@ pub fn register_font_dir(path: impl AsRef<Path>) -> Result<usize> {
     let added = db.len() - before;
     drop(db);
     f.rescue.lock().unwrap().clear();
+    #[cfg(feature = "svg")]
+    crate::svg::register_font_dir(path);
     Ok(added)
 }
 
 /// Register font bytes. Returns the families they add.
 pub fn register_font_data(bytes: Vec<u8>) -> Result<Vec<String>> {
     let f = fonts();
+    #[cfg(feature = "svg")]
+    let svg_copy = bytes.clone();
     let mut db = f.db.write().unwrap();
     let before: Vec<fontdb::ID> = db.faces().map(|i| i.id).collect();
     db.load_font_data(bytes);
@@ -118,6 +122,8 @@ pub fn register_font_data(bytes: Vec<u8>) -> Result<Vec<String>> {
     }
     families.dedup();
     f.rescue.lock().unwrap().clear();
+    #[cfg(feature = "svg")]
+    crate::svg::register_font_data(svg_copy);
     Ok(families)
 }
 

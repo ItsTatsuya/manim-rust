@@ -104,8 +104,8 @@ impl Axes {
 
     /// Graph coordinates → scene point (`coords_to_point`).
     pub fn c2p(&self, x: f64, y: f64) -> Point {
-        let fx = (x - self.x_range[0]) / (self.x_range[1] - self.x_range[0]);
-        let fy = (y - self.y_range[0]) / (self.y_range[1] - self.y_range[0]);
+        let fx = (x - self.x_range[0]) / span(self.x_range[0], self.x_range[1]);
+        let fy = (y - self.y_range[0]) / span(self.y_range[0], self.y_range[1]);
         self.center + pt((fx - 0.5) * self.x_length, (fy - 0.5) * self.y_length)
     }
 
@@ -145,19 +145,7 @@ impl Axes {
     }
 
     fn ticks(range: [f64; 3]) -> Vec<f64> {
-        let step = range[2];
-        if step <= 0.0 {
-            return Vec::new();
-        }
-        let mut v = (range[0] / step).ceil() * step;
-        let mut out = Vec::new();
-        while v <= range[1] + 1e-9 {
-            if v.abs() > 1e-9 {
-                out.push(v);
-            }
-            v += step;
-        }
-        out
+        grid_values(range).into_iter().filter(|v| v.abs() > 1e-9).collect()
     }
 
     fn axis(&self, start: Point, end: Point) -> VMobject {
@@ -236,15 +224,7 @@ impl NumberPlane {
 
     pub fn with_ranges(x_range: [f64; 3], y_range: [f64; 3]) -> VMobject {
         let mut lines = Vec::new();
-        let grid = |range: [f64; 3]| {
-            let mut v = (range[0] / range[2]).ceil() * range[2];
-            let mut out = Vec::new();
-            while v <= range[1] + 1e-9 {
-                out.push(v);
-                v += range[2];
-            }
-            out
-        };
+        let grid = grid_values;
         for x in grid(x_range) {
             if x.abs() > 1e-9 {
                 lines.push(Line::new(pt(x, y_range[0]), pt(x, y_range[1])).set_stroke(BLUE_D, 2.0));
@@ -260,5 +240,34 @@ impl NumberPlane {
             Line::new(pt(0.0, y_range[0]), pt(0.0, y_range[1])).set_stroke(WHITE, 2.0),
         ]);
         VMobject::group(vec![VMobject::group(lines), axes])
+    }
+}
+
+/// Most grid lines / ticks a single range may produce; guards against runaway user input.
+const MAX_GRID_VALUES: usize = 10_000;
+
+/// Multiples of `range[2]` inside `[range[0], range[1]]`. Empty for a non-positive or
+/// non-finite step or bounds, and capped at [`MAX_GRID_VALUES`].
+fn grid_values(range: [f64; 3]) -> Vec<f64> {
+    let [lo, hi, step] = range;
+    if !(step > 0.0 && step.is_finite() && lo.is_finite() && hi.is_finite()) || hi < lo {
+        return Vec::new();
+    }
+    let start = (lo / step).ceil();
+    let count = ((hi + 1e-9) / step).floor() - start + 1.0;
+    if count.is_nan() || count < 1.0 {
+        return Vec::new();
+    }
+    let count = (count as usize).min(MAX_GRID_VALUES);
+    (0..count).map(|i| (start + i as f64) * step).collect()
+}
+
+/// Width of a coordinate range, never zero (a degenerate range maps as width 1).
+fn span(lo: f64, hi: f64) -> f64 {
+    let d = hi - lo;
+    if d.abs() < 1e-12 || !d.is_finite() {
+        1.0
+    } else {
+        d
     }
 }

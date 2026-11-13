@@ -11,7 +11,11 @@ use crate::constants::*;
 
 /// Cubic approximation of a circular arc.
 pub fn arc_curves(center: Point, radius: f64, start_angle: f64, angle: f64) -> Vec<Cubic> {
-    let n = ((angle.abs() / (TAU / 8.0)).ceil() as usize).max(1);
+    if !angle.is_finite() || !start_angle.is_finite() || !radius.is_finite() {
+        return Vec::new();
+    }
+    // Eight cubics per turn; past 64 turns the extra windings are invisible, so cap there.
+    let n = ((angle.abs() / (TAU / 8.0)).ceil() as usize).clamp(1, 8 * 64);
     let seg = angle / n as f64;
     let k = 4.0 / 3.0 * (seg / 4.0).tan() * radius;
     (0..n)
@@ -214,8 +218,8 @@ impl DashedLine {
     }
     pub fn with_dash(start: Point, end: Point, dash_length: f64, dashed_ratio: f64) -> VMobject {
         let len = start.distance(end);
-        let period = dash_length / dashed_ratio.clamp(0.01, 1.0);
-        let n = ((len / period).ceil() as usize).max(1);
+        let period = dash_length.abs().max(1e-4) / dashed_ratio.clamp(0.01, 1.0);
+        let n = if len.is_finite() { ((len / period).ceil() as usize).clamp(1, 100_000) } else { 1 };
         let subpaths = (0..n)
             .map(|i| {
                 let a = i as f64 / n as f64;

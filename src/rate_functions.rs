@@ -63,8 +63,9 @@ pub fn wiggle(t: f64) -> f64 {
     there_and_back(t) * (2.0 * PI * t).sin()
 }
 
+/// Linear to the end over the first 80%, then holds (Manim's `squish_rate_func(linear, 0, 0.8)`).
 pub fn lingering(t: f64) -> f64 {
-    smooth((t / 0.8).clamp(0.0, 1.0))
+    (t / 0.8).clamp(0.0, 1.0)
 }
 
 pub fn exponential_decay(t: f64) -> f64 {

@@ -62,7 +62,15 @@ impl From<&Sound> for SoundInfo {
 /// Write 16-bit PCM WAV.
 pub fn write_wav(path: &Path, samples: &[f32], sample_rate: u32, channels: u16) -> Result<()> {
     let channels = channels.max(1);
-    let data_len = (samples.len() * 2) as u32;
+    if sample_rate == 0 {
+        bail!("WAV needs a sample rate above 0");
+    }
+    let data_len = samples
+        .len()
+        .checked_mul(2)
+        .and_then(|n| u32::try_from(n).ok())
+        .filter(|n| *n <= u32::MAX - 36)
+        .context("sound is too long for a WAV file (over 2 GB)")?;
     let mut out = Vec::with_capacity(44 + data_len as usize);
     out.extend_from_slice(b"RIFF");
     out.extend_from_slice(&(36 + data_len).to_le_bytes());
@@ -89,11 +97,14 @@ pub fn mux(ffmpeg: &Path, video: &Path, sounds: &[Sound]) -> Result<()> {
     if sounds.is_empty() {
         return Ok(());
     }
-    let tmp_dir = video.with_extension("audio-tmp");
+    // Unique per call: never collides with a user folder or a concurrent render.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp_dir = video.with_extension(format!("audio-tmp-{}-{n}", std::process::id()));
     std::fs::create_dir_all(&tmp_dir)?;
     let result = (|| -> Result<()> {
         let mut cmd = crate::output::tool_command(ffmpeg);
-        cmd.args(["-y", "-loglevel", "error", "-i"]).arg(video);
+        cmd.args(["-y", "-loglevel", "error", "-i"]).arg(crate::output::ffmpeg_path_arg(video));
         let mut filters = Vec::new();
         for (i, s) in sounds.iter().enumerate() {
             let input = match &s.source {
@@ -109,7 +120,7 @@ pub fn mux(ffmpeg: &Path, video: &Path, sounds: &[Sound]) -> Result<()> {
                     p
                 }
             };
-            cmd.arg("-i").arg(&input);
+            cmd.arg("-i").arg(crate::output::ffmpeg_path_arg(&input));
             let ms = (s.start.max(0.0) * 1000.0).round() as u64;
             filters.push(format!(
                 "[{}:a]aformat=sample_rates=48000:channel_layouts=stereo,adelay={ms}|{ms},volume={:.4}[a{i}]",
@@ -124,7 +135,7 @@ pub fn mux(ffmpeg: &Path, video: &Path, sounds: &[Sound]) -> Result<()> {
             .arg(filters.join(";"))
             .args(["-map", "0:v", "-map", "[aout]", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest"])
             .args(["-movflags", "+faststart"])
-            .arg(&out)
+            .arg(crate::output::ffmpeg_path_arg(&out))
             .stdin(Stdio::null());
         let res = cmd.output().with_context(|| format!("running {}", ffmpeg.display()))?;
         if !res.status.success() {

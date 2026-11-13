@@ -32,7 +32,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context as _, Result};
@@ -226,6 +226,8 @@ fn source_excerpt(text: &str, maps: &Maps) -> Option<String> {
     Some(format!("  {line} | {}", code.trim_end()))
 }
 
+const CANCELLED: &str = "cancelled";
+
 /// One loaded script.
 pub struct ScriptHost {
     // Fields drop in order: JS values first, then the context, then the runtime.
@@ -237,8 +239,12 @@ pub struct ScriptHost {
     scenes: Vec<(String, String)>,
     maps: Maps,
     cancel: Arc<AtomicBool>,
-    deadline: Arc<Mutex<Option<Instant>>>,
+    deadline: crate::config::Deadline,
     options: HostOptions,
+    /// This script's scene, handle table and paths (swapped in for every call).
+    state: RefCell<native::State>,
+    /// Handle table after the top level ran; each run starts from it.
+    initial_handles: Vec<native::Slot>,
 }
 
 impl ScriptHost {
@@ -259,7 +265,7 @@ impl ScriptHost {
         }
         runtime.set_max_stack_size(512 * 1024);
         let cancel = Arc::new(AtomicBool::new(false));
-        let deadline: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
+        let deadline: crate::config::Deadline = Default::default();
         {
             let (c, d) = (cancel.clone(), deadline.clone());
             runtime.set_interrupt_handler(Some(Box::new(move || {
@@ -273,68 +279,73 @@ impl ScriptHost {
         );
         let context = Context::full(&runtime)?;
         let base_dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
-        native::with_state(|st| {
+        let state = RefCell::new(native::State::default());
+        {
+            let mut st = state.borrow_mut();
             st.base_dir = base_dir;
             st.sandbox = options.sandbox.clone();
-        });
+        }
 
         let host_deadline = deadline.clone();
         if let Some(t) = options.timeout {
             *host_deadline.lock().unwrap() = Some(Instant::now() + t);
         }
-        let loaded = context.with(|ctx| -> Result<_> {
-            native::install(&ctx).map_err(|e| anyhow!("installing natives: {e}"))?;
-            let module = Module::declare(ctx.clone(), name.clone(), code).catch(&ctx).map_err(|e| caught(e, &maps))?;
-            let (module, promise) = module.eval().catch(&ctx).map_err(|e| caught(e, &maps))?;
-            promise.finish::<()>().catch(&ctx).map_err(|e| caught(e, &maps))?;
-            // A failed import can leave the exception pending without rejecting the promise.
-            let pending = ctx.catch();
-            if !matches!(
-                pending.type_of(),
-                rquickjs::Type::Uninitialized | rquickjs::Type::Undefined | rquickjs::Type::Null
-            ) {
-                let err = match pending.as_exception() {
-                    Some(e) => CaughtError::Exception(e.clone()),
-                    None => CaughtError::Value(pending),
-                };
-                return Err(caught(err, &maps));
-            }
-            let ns = module.namespace()?;
-            let is_scene: Option<Function> = ctx.globals().get("__manim_isScene")?;
-            let Some(is_scene) = is_scene else {
-                bail!("{} does not import from \"manim\"", name);
-            };
-            let mut scenes = Vec::new();
-            for key in ns.keys::<String>() {
-                let key = key?;
-                let v: Value = ns.get(&key)?;
-                if is_scene.call::<_, bool>((v.clone(),))? {
-                    let f: Function = v.get()?;
-                    let fname: String = f.get::<_, Option<String>>("name")?.unwrap_or_default();
-                    let scene_name = if key == "default" && !fname.is_empty() { fname } else { key.clone() };
-                    scenes.push((scene_name, key));
+        let loaded = native::with_host_state(&state, || {
+            context.with(|ctx| -> Result<_> {
+                native::install(&ctx).map_err(|e| anyhow!("installing natives: {e}"))?;
+                let module =
+                    Module::declare(ctx.clone(), name.clone(), code).catch(&ctx).map_err(|e| caught(e, &maps))?;
+                let (module, promise) = module.eval().catch(&ctx).map_err(|e| caught(e, &maps))?;
+                promise.finish::<()>().catch(&ctx).map_err(|e| caught(e, &maps))?;
+                // A failed import can leave the exception pending without rejecting the promise.
+                let pending = ctx.catch();
+                if !matches!(
+                    pending.type_of(),
+                    rquickjs::Type::Uninitialized | rquickjs::Type::Undefined | rquickjs::Type::Null
+                ) {
+                    let err = match pending.as_exception() {
+                        Some(e) => CaughtError::Exception(e.clone()),
+                        None => CaughtError::Value(pending),
+                    };
+                    return Err(caught(err, &maps));
                 }
-            }
-            // Namespace keys come sorted; list scenes in source order instead.
-            let pos = |key: &str, name: &str| -> usize {
-                let pats = if key == "default" {
-                    vec!["export default".to_string()]
-                } else {
-                    vec![
-                        format!("class {key}"),
-                        format!("const {key}"),
-                        format!("let {key}"),
-                        format!("function {key}"),
-                    ]
+                let ns = module.namespace()?;
+                let is_scene: Option<Function> = ctx.globals().get("__manim_isScene")?;
+                let Some(is_scene) = is_scene else {
+                    bail!("{} does not import from \"manim\"", name);
                 };
-                pats.iter()
-                    .chain([&format!("class {name}")])
-                    .filter_map(|p| source.find(p.as_str()))
-                    .min()
-                    .unwrap_or(usize::MAX)
-            };
-            scenes.sort_by_key(|(name, key)| pos(key, name));
-            Ok((scenes, Persistent::save(&ctx, ns)))
+                let mut scenes = Vec::new();
+                for key in ns.keys::<String>() {
+                    let key = key?;
+                    let v: Value = ns.get(&key)?;
+                    if is_scene.call::<_, bool>((v.clone(),))? {
+                        let f: Function = v.get()?;
+                        let fname: String = f.get::<_, Option<String>>("name")?.unwrap_or_default();
+                        let scene_name = if key == "default" && !fname.is_empty() { fname } else { key.clone() };
+                        scenes.push((scene_name, key));
+                    }
+                }
+                // Namespace keys come sorted; list scenes in source order instead.
+                let pos = |key: &str, name: &str| -> usize {
+                    let pats = if key == "default" {
+                        vec!["export default".to_string()]
+                    } else {
+                        vec![
+                            format!("class {key}"),
+                            format!("const {key}"),
+                            format!("let {key}"),
+                            format!("function {key}"),
+                        ]
+                    };
+                    pats.iter()
+                        .chain([&format!("class {name}")])
+                        .filter_map(|p| source.find(p.as_str()))
+                        .min()
+                        .unwrap_or(usize::MAX)
+                };
+                scenes.sort_by_key(|(name, key)| pos(key, name));
+                Ok((scenes, Persistent::save(&ctx, ns)))
+            })
         });
         let (scenes, namespace) = match (loaded, import_error.borrow_mut().take()) {
             (Ok(v), _) => v,
@@ -348,7 +359,33 @@ impl ScriptHost {
                 path.display()
             );
         }
-        Ok(ScriptHost { namespace, context, _runtime: runtime, path, scenes, maps, cancel, deadline, options })
+        let initial_handles = state.borrow().handles();
+        Ok(ScriptHost {
+            namespace,
+            context,
+            _runtime: runtime,
+            path,
+            scenes,
+            maps,
+            cancel,
+            deadline,
+            options,
+            state,
+            initial_handles,
+        })
+    }
+
+    /// Run `f` with this script's state active and its deadline armed. A new call also
+    /// clears a cancel left over from an earlier one.
+    fn enter<R>(&self, f: impl FnOnce() -> Result<R>) -> Result<R> {
+        self.cancel.store(false, Ordering::Relaxed);
+        *self.deadline.lock().unwrap() = self.options.timeout.map(|t| Instant::now() + t);
+        let r = native::with_host_state(&self.state, f);
+        *self.deadline.lock().unwrap() = None;
+        match r {
+            Err(_) if self.cancel.load(Ordering::Relaxed) => Err(anyhow!(CANCELLED)),
+            r => r,
+        }
     }
 
     pub fn path(&self) -> &Path {
@@ -369,14 +406,15 @@ impl ScriptHost {
     pub fn set_global_json(&self, name: &str, json: &str) -> Result<()> {
         let v: serde_json::Value = serde_json::from_str(json).context("set_global_json: invalid JSON")?;
         let src = format!("globalThis[{}] = {};", serde_json::to_string(name)?, v);
-        self.context.with(|ctx| ctx.eval::<(), _>(src).catch(&ctx).map_err(|e| caught(e, &self.maps)))
+        self.enter(|| self.context.with(|ctx| ctx.eval::<(), _>(src).catch(&ctx).map_err(|e| caught(e, &self.maps))))
     }
 
     /// Evaluate a JS expression and return its JSON value (for hosts and tests).
     pub fn eval_json<T: serde::de::DeserializeOwned>(&self, expr: &str) -> Result<T> {
         let src = format!("JSON.stringify({expr})");
-        let s: String =
-            self.context.with(|ctx| ctx.eval::<String, _>(src).catch(&ctx).map_err(|e| caught(e, &self.maps)))?;
+        let s: String = self.enter(|| {
+            self.context.with(|ctx| ctx.eval::<String, _>(src).catch(&ctx).map_err(|e| caught(e, &self.maps)))
+        })?;
         serde_json::from_str(&s).context("eval_json: result is not JSON")
     }
 
@@ -394,32 +432,35 @@ impl ScriptHost {
         let key = self.key_for(scene)?;
         let mut config = config.clone();
         config.cancel = Some(self.cancel.clone());
-        self.cancel.store(false, Ordering::Relaxed);
-        let s = Scene::new(&config, scene)?;
-        native::with_state(|st| st.scene = Some(s));
-        *self.deadline.lock().unwrap() = self.options.timeout.map(|t| Instant::now() + t);
-        let result = self.context.with(|ctx| -> Result<()> {
-            let ns = self.namespace.clone().restore(&ctx)?;
-            let cls: Value = ns.get(&key)?;
-            let run: Function = ctx.globals().get("__manim_run")?;
-            run.call::<_, ()>((cls,)).catch(&ctx).map_err(|e| caught(e, &self.maps))
+        config.deadline = Some(self.deadline.clone());
+        // Drop the previous scene (and its video writer) before starting the next.
+        self.state.borrow_mut().scene = None;
+        let result = self.enter(|| {
+            let s = Scene::new(&config, scene)?;
+            native::with_state(|st| {
+                st.reset_for_run(&self.initial_handles);
+                st.scene = Some(s);
+            });
+            self.context.with(|ctx| -> Result<()> {
+                let ns = self.namespace.clone().restore(&ctx)?;
+                let cls: Value = ns.get(&key)?;
+                let run: Function = ctx.globals().get("__manim_run")?;
+                run.call::<_, ()>((cls,)).catch(&ctx).map_err(|e| caught(e, &self.maps))
+            })
         });
-        *self.deadline.lock().unwrap() = None;
-        if let Err(e) = result {
-            if self.cancel.load(Ordering::Relaxed) {
-                return Err(anyhow!("render cancelled"));
-            }
-            return Err(e.context(format!("in scene {scene}")));
+        match result {
+            Err(e) if e.to_string() == CANCELLED => Err(anyhow!("render cancelled")),
+            Err(e) => Err(e.context(format!("in scene {scene}"))),
+            Ok(()) => Ok(()),
         }
-        Ok(())
     }
 
     /// Finish the loaded scene: flush video, add audio, write side files.
     pub fn finish(&self) -> Result<()> {
-        let mut s = native::with_state(|st| st.scene.take()).ok_or_else(|| anyhow!("no scene has run"))?;
+        let mut s = self.state.borrow_mut().scene.take().ok_or_else(|| anyhow!("no scene has run"))?;
         let started = s.created_at();
         let r = s.finish(started);
-        native::with_state(|st| st.scene = Some(s));
+        self.state.borrow_mut().scene = Some(s);
         r
     }
 
@@ -436,9 +477,11 @@ impl ScriptHost {
     /// Jump the loaded scene to time `t` (it must have run with `Config::record`).
     /// Script updaters run again for the frames replayed.
     pub fn seek(&self, t: f64) -> Result<()> {
-        self.context.with(|ctx| -> Result<()> {
-            let f: Function = ctx.globals().get("__manim_seek")?;
-            f.call::<_, ()>((t,)).catch(&ctx).map_err(|e| caught(e, &self.maps))
+        self.enter(|| {
+            self.context.with(|ctx| -> Result<()> {
+                let f: Function = ctx.globals().get("__manim_seek")?;
+                f.call::<_, ()>((t,)).catch(&ctx).map_err(|e| caught(e, &self.maps))
+            })
         })
     }
 
@@ -454,7 +497,7 @@ impl ScriptHost {
 
     /// Access the loaded scene (inspect, markers, problems, ...).
     pub fn with_scene<R>(&self, f: impl FnOnce(&mut Scene) -> R) -> Option<R> {
-        native::with_state(|st| st.scene.as_mut().map(f))
+        self.state.borrow_mut().scene.as_mut().map(f)
     }
 }
 

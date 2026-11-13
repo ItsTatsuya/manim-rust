@@ -52,24 +52,35 @@ fn runs(exe: &Path) -> bool {
     tool_command(exe).arg("-version").stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success())
 }
 
+static FFMPEG: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
+/// Use this ffmpeg executable from now on (`--ffmpeg`, [`Config::ffmpeg`](crate::config::Config::ffmpeg)).
+pub fn set_ffmpeg_path(path: impl Into<PathBuf>) {
+    *FFMPEG.lock().unwrap_or_else(|e| e.into_inner()) = Some(path.into());
+}
+
 /// Find an ffmpeg executable: `MANIM_FFMPEG`, then PATH, then (on Windows) winget's
 /// package folder, where installs land without being on PATH until a new shell starts.
+/// A hit is cached; a miss is not, so installing ffmpeg works without a restart.
 pub fn find_ffmpeg() -> Option<PathBuf> {
-    static FOUND: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
-    FOUND
-        .get_or_init(|| {
-            if let Some(p) = std::env::var_os("MANIM_FFMPEG").map(PathBuf::from) {
-                if runs(&p) {
-                    return Some(p);
-                }
-                eprintln!("manim: MANIM_FFMPEG={} does not run; searching elsewhere", p.display());
+    let mut cached = FFMPEG.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(p) = &*cached {
+        return Some(p.clone());
+    }
+    let found = (|| {
+        if let Some(p) = std::env::var_os("MANIM_FFMPEG").map(PathBuf::from) {
+            if runs(&p) {
+                return Some(p);
             }
-            if runs(Path::new("ffmpeg")) {
-                return Some(PathBuf::from("ffmpeg"));
-            }
-            winget_ffmpeg()
-        })
-        .clone()
+            eprintln!("manim: MANIM_FFMPEG={} does not run; searching elsewhere", p.display());
+        }
+        if runs(Path::new("ffmpeg")) {
+            return Some(PathBuf::from("ffmpeg"));
+        }
+        winget_ffmpeg()
+    })();
+    cached.clone_from(&found);
+    found
 }
 
 fn winget_ffmpeg() -> Option<PathBuf> {
@@ -301,7 +312,10 @@ impl YuvMatrix {
 /// and the pipe traffic by 2.7×. It is ~16× cheaper per frame than the scalar loop it
 /// replaced, which matters because it shares the CPU with x264. `width` and `height` must
 /// be even.
-pub fn rgba_to_yuv420(rgba: &[u8], width: usize, height: usize, matrix: YuvMatrix, out: &mut Vec<u8>) {
+pub fn rgba_to_yuv420(rgba: &[u8], width: usize, height: usize, matrix: YuvMatrix, out: &mut Vec<u8>) -> Result<()> {
+    if !width.is_multiple_of(2) || !height.is_multiple_of(2) || rgba.len() != width * height * 4 {
+        bail!("rgba_to_yuv420: need even {width}x{height} and {} bytes, got {}", width * height * 4, rgba.len());
+    }
     use yuvutils_rs::{BufferStoreMut, YuvConversionMode, YuvPlanarImageMut, YuvRange};
     let (cw, ch) = (width / 2, height / 2);
     out.resize(width * height + 2 * cw * ch, 0);
@@ -325,13 +339,42 @@ pub fn rgba_to_yuv420(rgba: &[u8], width: usize, height: usize, matrix: YuvMatri
         matrix.standard(),
         YuvConversionMode::Balanced,
     )
-    .expect("even frame size with matching buffers");
+    .map_err(|e| anyhow::anyhow!("YUV conversion failed: {e:?}"))
+}
+
+/// Where a writer puts a file until it is complete: `name.partial.ext` next to `path`.
+/// A failed or cancelled render then never replaces the last good output.
+pub fn partial_path(path: &Path) -> PathBuf {
+    let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let name = match path.extension() {
+        Some(e) => format!("{stem}.partial.{}", e.to_string_lossy()),
+        None => format!("{stem}.partial"),
+    };
+    path.with_file_name(name)
+}
+
+/// Move a finished `partial` file over `path`.
+fn publish(partial: &Path, path: &Path) -> Result<()> {
+    fs::rename(partial, path).with_context(|| format!("replacing {} (is it open in another program?)", path.display()))
+}
+
+/// An output path ffmpeg cannot mistake for an option (`-out.mp4` → `./-out.mp4`).
+pub(crate) fn ffmpeg_path_arg(path: &Path) -> PathBuf {
+    if path.as_os_str().to_string_lossy().starts_with('-') {
+        Path::new(".").join(path)
+    } else {
+        path.to_path_buf()
+    }
 }
 
 pub struct FfmpegWriter {
     child: Child,
     stdin: Option<BufWriter<ChildStdin>>,
     path: PathBuf,
+    partial: PathBuf,
+    done: bool,
+    /// ffmpeg's stderr, collected so an encode failure can say why.
+    stderr: Option<std::thread::JoinHandle<String>>,
     pub encoder: Encoder,
     /// Even dimensions: convert to YUV here. Odd: send RGBA and let ffmpeg pad + convert.
     yuv: Option<(usize, usize, YuvMatrix, Vec<u8>)>,
@@ -348,6 +391,7 @@ impl FfmpegWriter {
         let even = width.is_multiple_of(2) && height.is_multiple_of(2);
         // ffmpeg's own RGBA→YUV conversion (odd sizes) uses BT.601.
         let matrix = if even { YuvMatrix::for_height(height) } else { YuvMatrix::Bt601 };
+        let partial = partial_path(path);
         let mut cmd = tool_command(&exe);
         cmd.args(["-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", if even { "yuv420p" } else { "rgba" }])
             .args(["-s", &format!("{width}x{height}"), "-r", &format!("{fps}"), "-i", "-"]);
@@ -360,16 +404,27 @@ impl FfmpegWriter {
             .args(encoder.quality_args())
             .args(matrix.ffmpeg_tags())
             .args(["-movflags", "+faststart"])
-            .arg(path)
+            .arg(ffmpeg_path_arg(&partial))
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
             .context("failed to start ffmpeg")?;
         let stdin = child.stdin.take().map(|s| BufWriter::with_capacity(1 << 20, s));
+        let stderr = child.stderr.take().map(|mut e| {
+            std::thread::spawn(move || {
+                let mut text = String::new();
+                let _ = std::io::Read::read_to_string(&mut e, &mut text);
+                text
+            })
+        });
         Ok(FfmpegWriter {
             child,
             stdin,
             path: path.to_path_buf(),
+            partial,
+            done: false,
+            stderr,
             encoder,
             yuv: even.then(|| (width as usize, height as usize, matrix, Vec::new())),
             frames: 0,
@@ -382,13 +437,16 @@ impl FrameWriter for FfmpegWriter {
         let stdin = self.stdin.as_mut().context("ffmpeg stdin closed")?;
         let data: &[u8] = match &mut self.yuv {
             Some((w, h, m, buf)) => {
-                rgba_to_yuv420(rgba, *w, *h, *m, buf);
+                rgba_to_yuv420(rgba, *w, *h, *m, buf)?;
                 buf
             }
             None => rgba,
         };
         for _ in 0..repeat {
-            stdin.write_all(data).context("ffmpeg pipe closed")?;
+            if let Err(e) = stdin.write_all(data) {
+                let why = self.ffmpeg_message();
+                return Err(anyhow::Error::new(e).context(format!("ffmpeg stopped accepting frames{why}")));
+            }
         }
         self.frames += repeat as u64;
         Ok(())
@@ -396,11 +454,7 @@ impl FrameWriter for FfmpegWriter {
 
     fn finish(mut self: Box<Self>) -> Result<()> {
         if self.frames == 0 {
-            // Nothing to encode: don't leave an empty/corrupt file behind.
-            drop(self.stdin.take());
-            let _ = self.child.kill();
-            let _ = self.child.wait();
-            let _ = fs::remove_file(&self.path);
+            // Nothing to encode: Drop stops ffmpeg and removes the partial file.
             return Ok(());
         }
         if let Some(mut s) = self.stdin.take() {
@@ -408,8 +462,10 @@ impl FrameWriter for FfmpegWriter {
         }
         let status = self.child.wait()?;
         if !status.success() {
-            bail!("ffmpeg exited with {status}");
+            bail!("ffmpeg exited with {status}{}", self.ffmpeg_message());
         }
+        publish(&self.partial, &self.path)?;
+        self.done = true;
         Ok(())
     }
 
@@ -419,6 +475,34 @@ impl FrameWriter for FfmpegWriter {
 
     fn describe(&self) -> String {
         format!("mp4 ({})", self.encoder.codec())
+    }
+}
+
+impl FfmpegWriter {
+    /// ffmpeg's error output as `": ..."`, once it has exited (empty if it said nothing).
+    fn ffmpeg_message(&mut self) -> String {
+        drop(self.stdin.take());
+        let _ = self.child.wait();
+        let text = self.stderr.take().and_then(|h| h.join().ok()).unwrap_or_default();
+        let text = text.trim();
+        if text.is_empty() {
+            String::new()
+        } else {
+            format!(": {text}")
+        }
+    }
+}
+
+impl Drop for FfmpegWriter {
+    /// Not finished (error, cancel, or no frames): stop ffmpeg and remove the partial file.
+    fn drop(&mut self) {
+        if self.done {
+            return;
+        }
+        drop(self.stdin.take());
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let _ = fs::remove_file(&self.partial);
     }
 }
 
@@ -433,6 +517,8 @@ pub struct GifWriter {
     carry: f64,
     emitted: u64,
     path: PathBuf,
+    partial: PathBuf,
+    done: bool,
 }
 
 impl GifWriter {
@@ -440,7 +526,8 @@ impl GifWriter {
         if width > u16::MAX as u32 || height > u16::MAX as u32 {
             bail!("frame too large for GIF");
         }
-        let file = BufWriter::new(File::create(path).with_context(|| format!("creating {}", path.display()))?);
+        let partial = partial_path(path);
+        let file = BufWriter::new(File::create(&partial).with_context(|| format!("creating {}", partial.display()))?);
         let mut enc = gif::Encoder::new(file, width as u16, height as u16, &[])?;
         enc.set_repeat(gif::Repeat::Infinite)?;
         Ok(GifWriter {
@@ -452,6 +539,8 @@ impl GifWriter {
             carry: 0.0,
             emitted: 0,
             path: path.to_path_buf(),
+            partial,
+            done: false,
         })
     }
 
@@ -488,8 +577,9 @@ impl FrameWriter for GifWriter {
             self.emit(prev, acc)?;
         }
         drop(self.enc.take()); // writes the trailer and closes the file
-        if self.emitted == 0 {
-            let _ = fs::remove_file(&self.path);
+        if self.emitted > 0 {
+            publish(&self.partial, &self.path)?;
+            self.done = true;
         }
         Ok(())
     }
@@ -503,6 +593,15 @@ impl FrameWriter for GifWriter {
     }
 }
 
+impl Drop for GifWriter {
+    fn drop(&mut self) {
+        if !self.done {
+            drop(self.enc.take());
+            let _ = fs::remove_file(&self.partial);
+        }
+    }
+}
+
 pub struct PngSequence {
     dir: PathBuf,
     width: u32,
@@ -513,6 +612,17 @@ pub struct PngSequence {
 impl PngSequence {
     pub fn new(base: &Path, width: u32, height: u32) -> Result<Self> {
         fs::create_dir_all(base)?;
+        // Frames from an earlier, longer render would otherwise trail this one.
+        for e in fs::read_dir(base)?.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let is_frame = name
+                .strip_prefix("frame_")
+                .and_then(|n| n.strip_suffix(".png"))
+                .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+            if is_frame {
+                let _ = fs::remove_file(e.path());
+            }
+        }
         Ok(PngSequence { dir: base.to_path_buf(), width, height, index: 0 })
     }
 }
@@ -553,7 +663,7 @@ mod tests {
             let px = [rgb[0], rgb[1], rgb[2], 255];
             let rgba: Vec<u8> = px.iter().copied().cycle().take(16).collect();
             let mut out = Vec::new();
-            rgba_to_yuv420(&rgba, 2, 2, m, &mut out);
+            rgba_to_yuv420(&rgba, 2, 2, m, &mut out).unwrap();
             for (got, w) in [out[0], out[4], out[5]].iter().zip(want) {
                 assert!((*got as i32 - w as i32).abs() <= 1, "{m:?} {rgb:?}: got {out:?}, want {want:?}");
             }

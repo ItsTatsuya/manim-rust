@@ -197,9 +197,19 @@ impl AutoRenderer {
 
     fn run(&mut self, which: usize, frames: &[&DisplayList]) -> Result<Vec<Vec<u8>>> {
         if which == 0 {
-            self.cpu.render_batch(frames)
-        } else {
-            self.gpu.render_batch(frames)
+            return self.cpu.render_batch(frames);
+        }
+        match self.gpu.render_batch(frames) {
+            Ok(out) => Ok(out),
+            Err(e) => {
+                // A failing GPU (driver error, device lost, out of memory) must not end the
+                // render: switch to the CPU for good and redo this batch there.
+                self.choice = Some(0);
+                let message = format!("GPU failed ({e:#}); continuing on the CPU renderer");
+                self.events
+                    .emit("warning", serde_json::json!({ "message": message }), || Some(format!("manim: {message}")));
+                self.cpu.render_batch(frames)
+            }
         }
     }
 }
@@ -229,6 +239,9 @@ impl Renderer for AutoRenderer {
         let which = if self.trials[1] <= self.trials[0] { 1 } else { 0 };
         let t = std::time::Instant::now();
         let out = self.run(which, frames)?;
+        if self.choice.is_some() {
+            return Ok(out); // the GPU failed and was dropped mid-calibration
+        }
         let per_frame = t.elapsed().as_secs_f64() / frames.len() as f64;
         self.best[which] = self.best[which].min(per_frame);
         self.trials[which] += 1;
