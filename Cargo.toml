@@ -66,6 +66,10 @@ required-features = ["text"]
 name = "trajectory"
 required-features = ["text"]
 
+[[example]]
+name = "tables"
+required-features = ["text", "math"]
+
 [[test]]
 name = "animations"
 required-features = ["text"]

@@ -49,6 +49,22 @@ difference that matters when you use it.
 | `MarkupText` | Yes | Yes: `<b>`, `<i>`, `<span color= weight= font= size=>` |
 | `MathTex` / `Tex` | LaTeX (needs a TeX distribution) | Embedded Typst compiler: same idea, Typst math syntax (`x^2`, `integral_0^1`, `sum_(k=1)^n`), no install |
 
+### Tables, matrices and code
+
+| | Python Manim | manim-rust |
+|---|---|---|
+| `Table` entries | `Paragraph` (Pango, often a serif) | `Text` in the theme's body font |
+| `Matrix` entries | `MathTex` (LaTeX: `"\pi"`) | Typst math (`"pi"`), set at Manim's size: digits 0.333 units tall at font size 48 |
+| Matrix brackets | TeX delimiters (`\left[`) stretched to the entries | Drawn shapes with the same proportions: `[`, `(`, `{`, `\|`, `‖`, `⟨`, `.` |
+| `IntegerMatrix` digits | TeX | `Text` digits, sized like Manim's |
+| Structure | `matrix[0]` = entries, `matrix[1]`/`[2]` = brackets; table lines are direct members | Built mobject: a backgrounds group (highlights), the entries group (row by row), then lines (tables) or the brackets group (matrices). Use `get_entries`, `get_brackets`, `get_horizontal_lines`… rather than indices |
+| Rows / columns | Live `VGroup`s | Rust: copies. Scripts: copies whose style changes also reach the entries; `set_row_colors` / `set_column_colors` edit in place |
+| Positions | 1-based `(row, col)`, labels included | Same |
+| `Code` highlighting | Pygments (hundreds of languages) | Built-in lexers for Python, Rust, JavaScript, TypeScript, C, C++, C#, Java, Go, Kotlin, Swift, JSON, Bash, SQL; unknown languages are an error, `"text"` disables highlighting |
+| `Code` styles | All Pygments styles | 20 Pygments styles with Pygments' exact colors (`vim` default, `monokai`, `dracula`, `github-dark`, `one-dark`, `nord`, `gruvbox-*`, `solarized-*`, …) |
+| `Code` font | `"Monospace"` (Pango picks) | The theme's code font, else Consolas / Menlo / DejaVu Sans Mono |
+| `Code` parts | `code.code_lines`, `code.line_numbers`, `code.background` | Same names in scripts; in Rust, children of kind `CodeLines`, `CodeLineNumbers`, `CodeBackground` (`child_of_kind`) |
+
 ## 4. Video output
 
 | | Python Manim | manim-rust |
@@ -75,7 +91,7 @@ difference that matters when you use it.
 
 ## 6. What's missing
 
-3D (`ThreeDScene`, surfaces, camera orientation), `MovingCameraScene`, `Table`, `Matrix`,
-`Code`, LaTeX syntax (equations use Typst syntax), `--preview`, configuration files
+3D (`ThreeDScene`, surfaces, camera orientation), `MovingCameraScene`, LaTeX syntax
+(equations use Typst syntax), `--preview`, configuration files
 (`manim.cfg`), and Python bindings. Scenes can be written in TypeScript/JavaScript (see
 [SCRIPTING.md](SCRIPTING.md)) as well as Rust.

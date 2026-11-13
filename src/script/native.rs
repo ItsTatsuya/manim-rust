@@ -14,10 +14,14 @@ use rquickjs::{Ctx, Exception, Function, Object};
 use serde_json::{json, Value};
 
 use crate::animation::*;
-use crate::color::{Color, YELLOW_C};
+use crate::color::{Color, BLACK, PURE_YELLOW, YELLOW_C};
 use crate::constants::*;
+use crate::mobject::code::{Code, CodeBackground};
 use crate::mobject::geometry::*;
 use crate::mobject::graphing::{Axes, NumberPlane};
+use crate::mobject::grid::{GridMobject, BRACKETS, HORIZONTAL_LINES, VERTICAL_LINES};
+use crate::mobject::matrix::{self, Matrix};
+use crate::mobject::table::Table;
 use crate::mobject::{Subpath, VMobject};
 use crate::rate_functions::{self, RateFunc};
 use crate::scene::{Playback, Scene};
@@ -514,6 +518,13 @@ fn apply_op(m: VMobject, name: &str, args: &[Value], refs: &Refs) -> Result<VMob
         "insertCurves" => m.insert_curves(arg_num(args, 0, 2.0).max(1.0) as usize),
         "setKind" => m.with_kind(arg(args, 0).as_str().unwrap_or("VMobject")),
         "setLabel" => m.with_label(arg(args, 0).as_str().unwrap_or("")),
+        "setRowColors" => m.set_row_colors(&colors_arg(arg(args, 0))?),
+        "setColumnColors" => m.set_column_colors(&colors_arg(arg(args, 0))?),
+        "addHighlightedCell" => {
+            let (r, c) = pos_arg(arg(args, 0))?;
+            m.add_highlighted_cell(r, c, color(arg(args, 1)).unwrap_or(PURE_YELLOW))
+        }
+        "addBackgroundToEntries" => m.add_background_to_entries(color(arg(args, 0)).unwrap_or(BLACK)),
         other => bail!("unknown mobject method '{other}'"),
     })
 }
@@ -577,6 +588,17 @@ fn query(m: &VMobject, name: &str, args: &[Value]) -> Result<Option<Value>> {
             json!(fam)
         }
         "hasText" => json!(m.has_text()),
+        "childIndexOfKind" => json!(m.child_index_of_kind(arg(args, 0).as_str().unwrap_or(""))),
+        "gridInfo" => match m.grid() {
+            Some(g) => json!({
+                "rows": g.rows, "cols": g.cols, "rowLabels": g.row_labels, "colLabels": g.col_labels,
+                "entries": m.children.iter().position(|c| c.meta.grid.is_some()),
+                "hlines": m.child_index_of_kind(HORIZONTAL_LINES),
+                "vlines": m.child_index_of_kind(VERTICAL_LINES),
+                "brackets": m.child_index_of_kind(BRACKETS),
+            }),
+            None => Value::Null,
+        },
         _ => return Ok(None),
     }))
 }
@@ -803,9 +825,244 @@ fn make(st: &mut State, kind: &str, o: &Value, refs: &Refs) -> Result<VMobject> 
             let yr = o.get("yRange").and_then(range3).unwrap_or([-4.0, 4.0, 1.0]);
             NumberPlane::with_ranges(xr, yr)
         }
+        "Table" | "MathTable" | "IntegerTable" | "DecimalTable" | "MobjectTable" => table(st, kind, o, refs)?,
+        "Matrix" | "IntegerMatrix" | "DecimalMatrix" | "MobjectMatrix" => matrix(st, kind, o, refs)?,
+        "TableCell" => {
+            let (r, c) = pos_arg(o.get("pos").unwrap_or(&Value::Null))?;
+            target("target")?.get_cell(r, c)
+        }
+        "TableHighlightedCell" => {
+            let (r, c) = pos_arg(o.get("pos").unwrap_or(&Value::Null))?;
+            target("target")?.get_highlighted_cell(r, c, opt_color(o, "color")?.unwrap_or(PURE_YELLOW))
+        }
+        "DetText" => {
+            let det = o.get("determinant").filter(|v| !v.is_null()).map(|v| match v {
+                Value::String(s) => s.clone(),
+                other => other.to_string(),
+            });
+            matrix::get_det_text(&target("target")?, det.as_deref())?
+        }
+        "Code" => code(st, o)?,
         other => bail!("unknown mobject type '{other}'"),
     };
+    // Table/Matrix/Code options aren't styles for the whole mobject.
+    if kind.ends_with("Table") || kind.ends_with("Matrix") || kind == "Code" {
+        return Ok(m);
+    }
     style_opts(m, o)
+}
+
+/// `[row, col]`, 1-based.
+fn pos_arg(v: &Value) -> Result<(usize, usize)> {
+    let a = v.as_array().filter(|a| a.len() == 2).context("a cell position is [row, col] (1-based)")?;
+    let n = |i: usize| a[i].as_f64().filter(|x| *x >= 1.0).map(|x| x as usize);
+    match (n(0), n(1)) {
+        (Some(r), Some(c)) => Ok((r, c)),
+        _ => bail!("a cell position is [row, col], both 1 or more; got {v}"),
+    }
+}
+
+/// A list of colors; a nested list counts as its first color (Manim allows gradients there).
+fn colors_arg(v: &Value) -> Result<Vec<Color>> {
+    let list = v.as_array().context("expected a list of colors")?;
+    list.iter()
+        .map(|c| {
+            // `[r, g, b]` is one color; a list of colors is a gradient.
+            let c = match c.as_array() {
+                Some(a) if a.first().is_some_and(|f| f.is_string() || f.is_array()) => &a[0],
+                _ => c,
+            };
+            color(c).ok_or_else(|| anyhow!("invalid color {c}"))
+        })
+        .collect()
+}
+
+fn sub<'a>(o: &'a Value, k: &str) -> &'a Value {
+    o.get(k).unwrap_or(&Value::Null)
+}
+
+fn flag(o: &Value, k: &str, default: bool) -> bool {
+    o.get(k).and_then(Value::as_bool).unwrap_or(default)
+}
+
+/// One table or matrix entry: a mobject as is, else a string or number built per `kind`.
+fn grid_entry(st: &mut State, kind: &str, v: &Value, refs: &Refs, cfg: &Value) -> Result<VMobject> {
+    if let Some(m) = refs.mob(v) {
+        return Ok(m.clone());
+    }
+    let s = match v {
+        Value::String(s) => s.clone(),
+        Value::Null => String::new(),
+        other => other.to_string(),
+    };
+    let number = || v.as_f64().or_else(|| s.trim().parse().ok()).ok_or_else(|| anyhow!("{kind}: {v} is not a number"));
+    // Manim's matrices and math tables set entries smaller than `Text`; `fontSize` scales that.
+    let scale = opt_num(cfg, "fontSize").map_or(1.0, |f| f / DEFAULT_FONT_SIZE);
+    let color = opt_color(cfg, "color")?;
+    let numbers = || {
+        let st = matrix::ce_number_style();
+        let size = st.font_size * scale;
+        let st = st.size(size);
+        match color {
+            Some(c) => st.color(c),
+            None => st,
+        }
+    };
+    Ok(match kind {
+        "IntegerTable" | "IntegerMatrix" => DecimalNumber::styled(number()?.round(), 0, numbers()).with_kind("Integer"),
+        "DecimalTable" | "DecimalMatrix" => {
+            let places = opt_num(cfg, "numDecimalPlaces").unwrap_or(1.0).max(0.0) as usize;
+            DecimalNumber::styled(number()?, places, numbers())
+        }
+        "MobjectTable" | "MobjectMatrix" => bail!("{kind} entries must be mobjects, got {v}"),
+        "MathTable" | "Matrix" => {
+            #[cfg(feature = "math")]
+            {
+                let c = color.unwrap_or_else(|| crate::defaults::get().text_color);
+                crate::math::MathTex::styled(&s, matrix::ce_math_size() * scale, c)?
+            }
+            #[cfg(not(feature = "math"))]
+            {
+                Text::styled(&s, numbers())
+            }
+        }
+        _ => Text::styled(&s, text_style(st, cfg)?),
+    })
+}
+
+fn grid_rows(st: &mut State, kind: &str, o: &Value, refs: &Refs) -> Result<Vec<Vec<VMobject>>> {
+    let key = if kind.contains("Matrix") { "matrix" } else { "table" };
+    let rows = o.get(key).and_then(Value::as_array).with_context(|| format!("{kind} needs '{key}', a list of rows"))?;
+    let cfg = sub(o, "elementToMobjectConfig").clone();
+    rows.iter()
+        .map(|r| {
+            let r = r.as_array().with_context(|| format!("{kind}: each row must be a list, got {r}"))?;
+            r.iter().map(|v| grid_entry(st, kind, v, refs, &cfg)).collect()
+        })
+        .collect()
+}
+
+fn labels(st: &mut State, o: &Value, k: &str, refs: &Refs) -> Result<Vec<VMobject>> {
+    let Some(list) = o.get(k).and_then(Value::as_array) else { return Ok(Vec::new()) };
+    list.iter().map(|v| grid_entry(st, "Table", v, refs, &Value::Null)).collect()
+}
+
+fn table(st: &mut State, kind: &str, o: &Value, refs: &Refs) -> Result<VMobject> {
+    let mut t = Table::from_mobjects(grid_rows(st, kind, o, refs)?)
+        .row_labels(labels(st, o, "rowLabels", refs)?)
+        .col_labels(labels(st, o, "colLabels", refs)?)
+        .include_outer_lines(flag(o, "includeOuterLines", false))
+        .include_inner_lines(flag(o, "includeInnerLines", true));
+    if let Some(v) = o.get("topLeftEntry").filter(|v| !v.is_null()) {
+        t = t.top_left_entry(grid_entry(st, "Table", v, refs, &Value::Null)?);
+    }
+    if let Some(b) = opt_num(o, "vBuff") {
+        t = t.v_buff(b);
+    }
+    if let Some(b) = opt_num(o, "hBuff") {
+        t = t.h_buff(b);
+    }
+    let lc = sub(o, "lineConfig");
+    if let Some(c) = opt_color(lc, "color")?.or(opt_color(lc, "strokeColor")?) {
+        t = t.line_color(c);
+    }
+    if let Some(w) = opt_num(lc, "strokeWidth") {
+        t = t.line_width(w);
+    }
+    if flag(o, "addBackgroundRectanglesToEntries", false) {
+        t = t.add_background_rectangles_to_entries(opt_color(o, "entriesBackgroundColor")?.unwrap_or(BLACK));
+    }
+    if flag(o, "includeBackgroundRectangle", false) {
+        t = t.include_background_rectangle(opt_color(o, "backgroundRectangleColor")?.unwrap_or(BLACK));
+    }
+    t.build()
+}
+
+fn matrix(st: &mut State, kind: &str, o: &Value, refs: &Refs) -> Result<VMobject> {
+    let mut m = Matrix::from_mobjects(grid_rows(st, kind, o, refs)?)
+        .stretch_brackets(flag(o, "stretchBrackets", true))
+        .add_background_rectangles_to_entries(flag(o, "addBackgroundRectanglesToEntries", false))
+        .include_background_rectangle(flag(o, "includeBackgroundRectangle", false));
+    if let Some(b) = opt_num(o, "vBuff") {
+        m = m.v_buff(b);
+    }
+    if let Some(b) = opt_num(o, "hBuff") {
+        m = m.h_buff(b);
+    }
+    if let Some(b) = opt_num(o, "bracketHBuff") {
+        m = m.bracket_h_buff(b);
+    }
+    if let Some(b) = opt_num(o, "bracketVBuff") {
+        m = m.bracket_v_buff(b);
+    }
+    if let Some(p) = opt_point(o, "elementAlignmentCorner") {
+        m = m.element_alignment_corner(p);
+    }
+    let l = o.get("leftBracket").and_then(Value::as_str).unwrap_or("[");
+    let r = o.get("rightBracket").and_then(Value::as_str).unwrap_or("]");
+    m = m.brackets(l, r);
+    if let Some(c) = opt_color(sub(o, "bracketConfig"), "color")? {
+        m = m.bracket_color(c);
+    }
+    Ok(m.build())
+}
+
+fn code(st: &mut State, o: &Value) -> Result<VMobject> {
+    let mut c = match (o.get("codeFile").and_then(Value::as_str), o.get("codeString").and_then(Value::as_str)) {
+        (Some(path), _) => Code::from_file(asset_path(st, path)?)?,
+        (None, Some(src)) => Code::new(src),
+        _ => bail!("Code needs codeString or codeFile"),
+    };
+    if let Some(l) = o.get("language").and_then(Value::as_str) {
+        c = c.language(l);
+    }
+    if let Some(s) = o.get("formatterStyle").and_then(Value::as_str) {
+        c = c.style(s);
+    }
+    if let Some(n) = opt_num(o, "tabWidth") {
+        c = c.tab_width(n.max(0.0) as usize);
+    }
+    c = c.line_numbers(flag(o, "addLineNumbers", true));
+    if let Some(n) = opt_num(o, "lineNumbersFrom") {
+        c = c.line_numbers_from(n.max(0.0) as usize);
+    }
+    c = c.background(match o.get("background").and_then(Value::as_str).unwrap_or("rectangle") {
+        "rectangle" | "rect" => CodeBackground::Rectangle,
+        "window" => CodeBackground::Window,
+        other => bail!("unknown Code background '{other}' (rectangle or window)"),
+    });
+    // Paragraph settings may also be given at the top level.
+    for p in [o, sub(o, "paragraphConfig")] {
+        if let Some(f) = p.get("font").and_then(Value::as_str) {
+            c = c.font(f);
+        }
+        if let Some(s) = opt_num(p, "fontSize") {
+            c = c.font_size(s);
+        }
+        if let Some(s) = opt_num(p, "lineSpacing") {
+            c = c.line_spacing(s);
+        }
+    }
+    let bg = sub(o, "backgroundConfig");
+    if let Some(b) = opt_num(bg, "buff") {
+        c = c.background_buff(b);
+    }
+    if let Some(r) = opt_num(bg, "cornerRadius") {
+        c = c.corner_radius(r);
+    }
+    if let Some(f) = opt_color(bg, "fillColor")?.or(opt_color(bg, "color")?) {
+        c.background_fill = Some(f);
+    }
+    if let Some(v) = opt_num(bg, "fillOpacity") {
+        c.background_fill_opacity = v;
+    }
+    if let Some(s) = opt_color(bg, "strokeColor")? {
+        c.background_stroke_color = s;
+    }
+    if let Some(w) = opt_num(bg, "strokeWidth") {
+        c.background_stroke_width = w;
+    }
+    c.build()
 }
 
 fn range3(v: &Value) -> Option<[f64; 3]> {
@@ -1379,6 +1636,8 @@ pub(crate) fn install(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
     }));
 
     reg!(ctx, n, "hasFont", |name: String| Ok(crate::text::has_font(&name)));
+    reg!(ctx, n, "codeStyles", || Ok(json!(Code::styles()).to_string()));
+    reg!(ctx, n, "codeLanguages", || Ok(json!(Code::languages()).to_string()));
 
     reg!(ctx, n, "log", |msg: String| {
         eprintln!("{msg}");

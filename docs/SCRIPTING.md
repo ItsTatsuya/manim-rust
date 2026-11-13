@@ -59,6 +59,57 @@ export default class Lesson extends Scene {
 - Scripts may import `"manim"` and relative files (`import { title } from "./style"`).
   They have no file system, network or process access.
 
+### Tables, matrices and code
+
+```ts
+import { Scene, Table, Matrix, IntegerMatrix, Code, Text, SurroundingRectangle, GREEN, RED, YELLOW } from "manim";
+
+export default class Data extends Scene {
+  construct() {
+    const t = Table([["First", "Second"], ["Third", "Fourth"]], {
+      rowLabels: [Text("R1"), Text("R2")], colLabels: [Text("C1"), Text("C2")], includeOuterLines: true,
+    });
+    t.addHighlightedCell([2, 2], { color: GREEN });   // [row, col], 1-based, labels included
+    t.getEntries([3, 3]).setColor(RED);               // a live entry
+    this.play(t.create());                            // lines, then entries, then labels
+
+    const m = Matrix([[2, "pi"], [-1, 1]], { leftBracket: "(", rightBracket: ")" });
+    m.setColumnColors(RED, YELLOW);
+    const box = SurroundingRectangle(m.getColumns()[1]);
+
+    const code = Code({ codeString: "def f(x):\n    return 2 * x\n", language: "python",
+                        formatterStyle: "monokai", background: "window" });
+    const line2 = SurroundingRectangle(code.codeLines.get(1));
+  }
+}
+```
+
+- `Table`, `MathTable`, `IntegerTable`, `DecimalTable` and `MobjectTable` take rows of
+  strings, numbers or mobjects. Options follow Manim: `rowLabels`, `colLabels`,
+  `topLeftEntry`, `vBuff` (0.8), `hBuff` (1.3), `includeOuterLines`, `includeInnerLines`,
+  `lineConfig`, `addBackgroundRectanglesToEntries`, `includeBackgroundRectangle`,
+  `elementToMobjectConfig` (text options for the entries).
+- `Matrix` entries are equations in Typst math syntax (`"pi"`, `"x^2"`; numbers work),
+  sized and spaced like Manim's (digits 0.333 units tall at the default size).
+  `IntegerMatrix`, `DecimalMatrix` (`elementToMobjectConfig: { numDecimalPlaces }`) and
+  `MobjectMatrix` too. Brackets: `leftBracket`/`rightBracket` `"["`, `"("`, `"{"`, `"|"`,
+  `"||"`, `"<"` (or `"\\langle"`), `"."` for none; `getDetText(m, { determinant })`.
+- Both have `getEntries()` (a live group, row by row) and `getEntries([r, c])`,
+  `getRows()`, `getColumns()`, `getMobMatrix()`, `setRowColors(...)`,
+  `setColumnColors(...)`, `getCell([r, c])`, `getHighlightedCell`, `addHighlightedCell`,
+  `getHorizontalLines()`, `getVerticalLines()`, `getBrackets()`, `getLabels()`.
+  Rows and columns are copies for framing and measuring; style changes on them
+  (`setColor`, `setFill`, …) also reach the entries.
+- `Code` highlights `codeString` or `codeFile` (a project file; the language follows the
+  extension) like Manim with Pygments: `language` (Python, Rust, TypeScript, JavaScript, C,
+  C++, C#, Java, Go, Kotlin, Swift, JSON, Bash, SQL; guessed when omitted),
+  `formatterStyle` (`"vim"` by default; `"monokai"`, `"dracula"`, `"github-dark"`,
+  `"one-dark"`, `"nord"`, … in `Code.getStylesList()`), `addLineNumbers`,
+  `lineNumbersFrom`, `tabWidth`, `background: "rectangle" | "window"`,
+  `backgroundConfig`, `paragraphConfig: { font, fontSize, lineSpacing }`. The font is
+  the theme's code font. `code.codeLines.get(i)` is line `i` (0-based) as live text;
+  `code.lineNumbers` and `code.background` are the other parts.
+
 The full API is in [`src/script/manim.d.ts`](../src/script/manim.d.ts) (`manim-rs types`).
 
 ## Command line for hosts

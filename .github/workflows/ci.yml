@@ -37,6 +37,6 @@ jobs:
       - name: Render every example (CPU, last frame only)
         shell: bash
         run: |
-          for ex in square_to_circle showcase graphing benchmark trajectory; do
+          for ex in square_to_circle showcase graphing benchmark trajectory tables; do
             cargo run -q --release --example "$ex" -- -ql -s --renderer cpu -q
           done

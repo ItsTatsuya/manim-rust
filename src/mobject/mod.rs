@@ -5,8 +5,16 @@
 //! To mutate a mobject that already lives in a scene use
 //! `scene.modify(id, |m| m.shift(RIGHT))`.
 
+#[cfg(feature = "text")]
+pub mod code;
 pub mod geometry;
 pub mod graphing;
+pub mod grid;
+pub mod highlight;
+#[cfg(feature = "text")]
+pub mod matrix;
+#[cfg(feature = "text")]
+pub mod table;
 
 use std::sync::Arc;
 
@@ -66,6 +74,24 @@ pub struct Meta {
     /// Fill with the non-zero winding rule instead of even-odd. Font glyphs and SVG paths
     /// need it: their contours may overlap (variable fonts) without meaning a hole.
     pub nonzero: bool,
+    /// On the entries group of a `Table` or `Matrix`: the grid's shape and spacing.
+    pub grid: Option<Grid>,
+}
+
+/// Shape and spacing of a table's or matrix's entry grid. The entries group holds the
+/// entries row by row; transforms scale the buffers along with the points.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Grid {
+    pub rows: usize,
+    pub cols: usize,
+    /// Horizontal gap between columns (Manim's `h_buff`).
+    pub h_buff: f64,
+    /// Vertical gap between rows (Manim's `v_buff`).
+    pub v_buff: f64,
+    /// Table only: the first column holds row labels.
+    pub row_labels: bool,
+    /// Table only: the first row holds column labels.
+    pub col_labels: bool,
 }
 
 impl Meta {
@@ -228,6 +254,20 @@ impl VMobject {
         self.children.push(child.into());
     }
 
+    /// Index of the first direct child whose `meta.kind` is `kind`.
+    pub fn child_index_of_kind(&self, kind: &str) -> Option<usize> {
+        self.children.iter().position(|c| c.meta.kind() == kind)
+    }
+
+    /// The first direct child whose `meta.kind` is `kind` (parts of `Code`, `Table`, ...).
+    pub fn child_of_kind(&self, kind: &str) -> Option<&VMobject> {
+        self.children.iter().find(|c| c.meta.kind() == kind)
+    }
+
+    pub fn child_of_kind_mut(&mut self, kind: &str) -> Option<&mut VMobject> {
+        self.children.iter_mut().find(|c| c.meta.kind() == kind)
+    }
+
     pub fn num_curves(&self) -> usize {
         self.family().iter().flat_map(|m| &m.subpaths).map(|s| s.curves.len()).sum()
     }
@@ -256,6 +296,12 @@ impl VMobject {
 
     fn map_points(mut self, f: impl Fn(Point) -> Point) -> Self {
         self.for_each_mut(&mut |m| {
+            if let Some(g) = &mut m.meta.grid {
+                // Exact for the affine maps (shift, scale, stretch, rotate) layout uses.
+                let o = f(ORIGIN);
+                g.h_buff = (f(pt(g.h_buff, 0.0)) - o).length();
+                g.v_buff = (f(pt(0.0, g.v_buff)) - o).length();
+            }
             if let Some(a) = &mut m.meta.anchors {
                 for p in a.iter_mut() {
                     *p = f(*p);

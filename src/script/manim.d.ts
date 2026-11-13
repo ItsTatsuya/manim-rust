@@ -272,6 +272,155 @@ declare module "manim" {
   }
   export const Axes: Ctor<[options?: AxesOptions], AxesMobject>;
 
+  // ------------------------------------------------------------------ tables, matrices, code
+  /** A cell position: [row, column], 1-based, labels included (Manim's convention). */
+  export type CellPos = [number, number];
+  /** A table/matrix entry: text, a number, or any mobject. */
+  export type Entry = string | number | Mobject;
+
+  /** A group of text-like members (table entries, code lines): `get(i)` has `text`, `slice`, `part`. */
+  export interface TextGroup extends Mobject {
+    get(i: number): TextMobject;
+  }
+  /** A row or column: a copy for measuring and framing; style changes (setColor, setFill...) also reach the entries. */
+  export interface GridSlice extends Mobject {}
+
+  /** Shared by tables and matrices. snake_case aliases work (get_entries, set_row_colors...). */
+  export interface GridMobject extends Mobject {
+    /** Every entry (a live group, row by row; `.get(i)` picks one), or the entry at [row, col]. */
+    getEntries(): TextGroup;
+    getEntries(pos: CellPos): TextMobject;
+    /** Entries as rows of live mobjects. */
+    getMobMatrix(): TextMobject[][];
+    getRows(): GridSlice[];
+    getColumns(): GridSlice[];
+    getEntriesWithoutLabels(): TextMobject[];
+    getRowLabels(): TextMobject[];
+    getColLabels(): TextMobject[];
+    getLabels(): TextMobject[];
+    /** One color per row (labels included). */
+    setRowColors(...colors: (Color | Color[])[]): this;
+    /** One color per column (labels included). */
+    setColumnColors(...colors: (Color | Color[])[]): this;
+    /** The outline of a cell, as a new polygon. */
+    getCell(pos: CellPos, options?: StyleOptions): Mobject;
+    /** A filled rectangle covering a cell, as a new mobject. */
+    getHighlightedCell(pos: CellPos, options?: Color | (StyleOptions & { color?: Color })): Mobject;
+    /** Put a highlight (default PURE_YELLOW) behind a cell. */
+    addHighlightedCell(pos: CellPos, options?: Color | { color?: Color }): this;
+    /** A 75%-opaque rectangle (default BLACK) behind each entry. */
+    addBackgroundToEntries(color?: Color): this;
+    getHorizontalLines(): Mobject;
+    getVerticalLines(): Mobject;
+    /** A matrix's [left, right] brackets (a live group). */
+    getBrackets(): Mobject;
+  }
+
+  export interface TableMobject extends GridMobject {
+    readonly horizontalLines: Mobject;
+    readonly verticalLines: Mobject;
+    /** Manim's `table.create()`: lines, then entries, then labels. Adds the table to the scene; play the result. */
+    create(options?: AnimationOptions & { lagRatio?: number }): Animation;
+  }
+
+  export interface TableOptions {
+    /** Mobjects (or strings) left of each row. */
+    rowLabels?: Entry[];
+    /** Mobjects (or strings) above each column. */
+    colLabels?: Entry[];
+    /** Shown where the label row and column meet. */
+    topLeftEntry?: Entry;
+    /** Gap between rows (default 0.8). */
+    vBuff?: number;
+    /** Gap between columns (default 1.3). */
+    hBuff?: number;
+    /** Lines around the table (default false). */
+    includeOuterLines?: boolean;
+    /** Lines between rows and columns (default true). */
+    includeInnerLines?: boolean;
+    lineConfig?: { color?: Color; strokeWidth?: number };
+    addBackgroundRectanglesToEntries?: boolean;
+    entriesBackgroundColor?: Color;
+    includeBackgroundRectangle?: boolean;
+    backgroundRectangleColor?: Color;
+    /** For string/number entries: text options (Table), or { fontSize, color, numDecimalPlaces }. */
+    elementToMobjectConfig?: TextOptions & { numDecimalPlaces?: number };
+  }
+  /** A table of text entries (`\n` breaks lines). */
+  export const Table: Ctor<[table: Entry[][], options?: TableOptions], TableMobject>;
+  /** A table of equations in Typst math syntax. */
+  export const MathTable: Ctor<[table: Entry[][], options?: TableOptions], TableMobject>;
+  export const IntegerTable: Ctor<[table: number[][], options?: TableOptions], TableMobject>;
+  /** `elementToMobjectConfig: { numDecimalPlaces }` (default 1). */
+  export const DecimalTable: Ctor<[table: number[][], options?: TableOptions], TableMobject>;
+  export const MobjectTable: Ctor<[table: Mobject[][], options?: TableOptions], TableMobject>;
+
+  export interface MatrixOptions {
+    /** Distance between row anchors (default 0.8). */
+    vBuff?: number;
+    /** Distance between column anchors (default 1.3). */
+    hBuff?: number;
+    /** Gap between the entries and each bracket (default MED_SMALL_BUFF). */
+    bracketHBuff?: number;
+    /** How far the brackets reach past the entries (default MED_SMALL_BUFF). */
+    bracketVBuff?: number;
+    /** Which corner of each entry sits on its anchor (default DR: right-aligned). */
+    elementAlignmentCorner?: Point;
+    /** "[" (default), "(", "{", "|", "||", "<" or "\\langle", "." for none. */
+    leftBracket?: string;
+    rightBracket?: string;
+    /** Fit the brackets to the entries (default true). */
+    stretchBrackets?: boolean;
+    bracketConfig?: { color?: Color };
+    addBackgroundRectanglesToEntries?: boolean;
+    includeBackgroundRectangle?: boolean;
+    /** For string/number entries: { fontSize, color, numDecimalPlaces }. */
+    elementToMobjectConfig?: { fontSize?: number; color?: Color; numDecimalPlaces?: number };
+  }
+  /** A matrix of equations (Typst math syntax: "pi", "x^2"; numbers work too) in brackets. */
+  export const Matrix: Ctor<[matrix: Entry[][], options?: MatrixOptions], GridMobject>;
+  export const IntegerMatrix: Ctor<[matrix: number[][], options?: MatrixOptions], GridMobject>;
+  /** `elementToMobjectConfig: { numDecimalPlaces }` (default 1). */
+  export const DecimalMatrix: Ctor<[matrix: number[][], options?: MatrixOptions], GridMobject>;
+  export const MobjectMatrix: Ctor<[matrix: Mobject[][], options?: MatrixOptions], GridMobject>;
+  /** "det" and parentheses around a matrix, with "= determinant" when given. */
+  export function getDetText(matrix: GridMobject, options?: { determinant?: string | number } | string | number): Mobject;
+  export const get_det_text: typeof getDetText;
+
+  export interface CodeOptions {
+    codeString?: string;
+    /** A file in the project folder; the language follows its extension. */
+    codeFile?: string;
+    /** "python", "rust", "typescript", "javascript", "c", "cpp", "csharp", "java", "go", "kotlin", "swift", "json", "bash", "sql", "text" (aliases like "py" work). Guessed when omitted. */
+    language?: string;
+    /** A Pygments style: "vim" (default), "monokai", "dracula", "github-dark", "one-dark", "nord", ... (see Code.getStylesList()). */
+    formatterStyle?: string;
+    tabWidth?: number;
+    addLineNumbers?: boolean;
+    lineNumbersFrom?: number;
+    background?: "rectangle" | "window";
+    backgroundConfig?: { buff?: number; fillColor?: Color; fillOpacity?: number; strokeColor?: Color; strokeWidth?: number; cornerRadius?: number };
+    /** Font (default: the theme's code font, else a monospace system font), size (default 24), baseline distance in font sizes (default 1.04). */
+    paragraphConfig?: { font?: string; fontSize?: number; lineSpacing?: number };
+  }
+  export interface CodeMobject extends Mobject {
+    /** One live text group per line: `code.codeLines.get(2)` is the third line. */
+    readonly codeLines: TextGroup;
+    readonly code_lines: TextGroup;
+    /** One live group per line number (null without line numbers). */
+    readonly lineNumbers: TextGroup | null;
+    readonly line_numbers: TextGroup | null;
+    /** The background (the window buttons are its members). */
+    readonly background: Mobject;
+  }
+  /** A syntax-highlighted listing: `Code({ codeString, language })`, `Code("file.py")`, or `Code(source, options)`. */
+  export const Code: Ctor<[codeOrOptions: string | CodeOptions, options?: CodeOptions], CodeMobject> & {
+    getStylesList(): string[];
+    get_styles_list(): string[];
+    getLanguages(): string[];
+    get_languages(): string[];
+  };
+
   export class ValueTracker {
     constructor(value?: number);
     getValue(): number;

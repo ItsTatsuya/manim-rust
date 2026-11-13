@@ -268,3 +268,64 @@ fn types_cover_the_exports() {
     let missing: Vec<&String> = names.iter().filter(|n| !manim::script::TYPES.contains(&format!(" {n}"))).collect();
     assert!(missing.is_empty(), "undeclared exports: {missing:?}");
 }
+
+#[test]
+fn tables_matrices_and_code() {
+    let d = dir("tmc");
+    write(&d, "snippet.py", "def f(x):\n    return x\n");
+    let p = write(
+        &d,
+        "tmc.ts",
+        r##"
+import { Scene, Table, Matrix, IntegerMatrix, DecimalMatrix, MathTable, Code, Text, SurroundingRectangle,
+  getDetText, Create, GREEN, RED, YELLOW, LEFT } from "manim";
+const check = (ok: boolean, what: string) => { if (!ok) throw new Error(what); };
+export default class T extends Scene {
+  construct() {
+    const t = Table([["First", "Second"], ["Third", "Fourth"]], {
+      row_labels: [Text("R1"), Text("R2")], col_labels: ["C1", "C2"], include_outer_lines: true,
+      line_config: { stroke_width: 2 },
+    });
+    check(t.getHorizontalLines().length === 4 && t.get_vertical_lines().length === 4, "outer + inner lines");
+    check(t.getEntries([2, 2]).text === "First", "entry [2, 2]");
+    check(t.getRows().length === 3 && t.getColumns().length === 3, "rows and columns with labels");
+    check(t.getLabels().length === 4 && t.getEntriesWithoutLabels().length === 4, "labels");
+    t.add_highlighted_cell([2, 2], { color: GREEN });
+    t.getEntries([2, 2]).setColor(RED);                      // a live view, still right after the highlight
+    check(t.getEntries([2, 2]).getColor() === "#FC6255", "entry color: " + t.getEntries([2, 2]).getColor());
+    t.getColumns()[2].setColor(YELLOW);                      // a slice: style reaches the entries
+    check(t.getEntries([3, 3]).getColor() === "#F7D96F", "column color");
+    const cell = t.getCell([1, 1]);
+    check(cell.width > 1 && cell.height > 0.5, "cell size");
+    this.play(t.create());
+    check(this.mobjects.length === 1, "create() leaves one table on screen: " + this.mobjects.length);
+    t.shift(LEFT);
+
+    const m = Matrix([[2, "pi"], [-1, 1]], { left_bracket: "(", right_bracket: ")" });
+    check(m.getBrackets().length === 2, "brackets");
+    check(Math.abs(m.getEntries([2, 2]).height - 0.333) < 0.01, "CE-sized entries");
+    m.set_column_colors(RED, GREEN);
+    check(m.getEntries([2, 1]).getColor() === "#FC6255", "column colors");
+    const box = SurroundingRectangle(m.getColumns()[1]);
+    check(box.height > m.getEntries().height, "frame a column");
+    const im = IntegerMatrix([[1, 2], [3, 4]]);
+    check(im.getEntries([1, 2]).text === "2", "integer entry");
+    const dm = DecimalMatrix([[1.256]], { element_to_mobject_config: { num_decimal_places: 2 } });
+    check(dm.getEntries([1, 1]).text === "1.26", "decimal places: " + dm.getEntries([1, 1]).text);
+    check(getDetText(m, { determinant: 2 }).length === 5, "det text");
+    this.add(m, box, MathTable([["x", "x^2"]]));
+
+    const c = Code({ code_string: "let x = 1;\nconsole.log(x);\n", language: "js", background: "window", formatter_style: "monokai" });
+    check(c.codeLines.length === 2 && c.code_lines.get(1).text === "console.log(x);", "code lines");
+    check(c.lineNumbers.length === 2, "line numbers");
+    check(Code.getStylesList().includes("vim"), "styles");
+    const f = Code("snippet.py");
+    check(f.codeLines.get(0).text === "def f(x):", "code from a file");
+    this.play(Create(c));
+  }
+}
+"##,
+    );
+    let host = ScriptHost::load(&p, HostOptions::default()).unwrap();
+    host.run("T", &cfg()).unwrap();
+}

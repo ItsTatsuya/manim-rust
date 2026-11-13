@@ -10,6 +10,13 @@ pub use crate::image::ImageMobject;
 pub use crate::math::{MathTex, Typst};
 pub use crate::mobject::geometry::*;
 pub use crate::mobject::graphing::*;
+pub use crate::mobject::grid::GridMobject;
+#[cfg(feature = "text")]
+pub use crate::mobject::{
+    code::{Code, CodeBackground},
+    matrix::Matrix,
+    table::Table,
+};
 pub use crate::mobject::{PathFunc, Subpath, VGroup, VMobject};
 pub use crate::output::{Encoder, OutputFormat};
 pub use crate::rate_functions::{self, *};

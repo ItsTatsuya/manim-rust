@@ -20,6 +20,8 @@ pub struct Defaults {
     pub font_size: f64,
     /// Fonts tried, in order, for characters the chosen font lacks.
     pub fallback_fonts: Vec<String>,
+    /// Font family of new `Code` (empty = the first installed monospace font).
+    pub code_font: String,
 }
 
 impl Default for Defaults {
@@ -30,6 +32,7 @@ impl Default for Defaults {
             font: String::new(),
             font_size: DEFAULT_FONT_SIZE,
             fallback_fonts: Vec::new(),
+            code_font: String::new(),
         }
     }
 }

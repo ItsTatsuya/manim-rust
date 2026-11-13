@@ -389,6 +389,170 @@ Object.assign(Axes.prototype, {
   getHorizontalLine(point, o) { const [, y] = this.p2c(point); return DashedLine(this.c2p(0, y), point, o); },
 });
 
+// ------------------------------------------------------------------ tables, matrices, code
+
+/** camelCase the keys of nested config objects too (`line_config: { stroke_width }`). */
+function nested(p, ...keys) {
+  for (const k of keys) if (p[k] && typeof p[k] === "object" && !Array.isArray(p[k])) p[k] = opts(p[k]);
+  return p;
+}
+function cellPos(pos) {
+  if (!Array.isArray(pos) || pos.length !== 2) throw new TypeError("a cell position is [row, col], 1-based");
+  return [pos[0], pos[1]];
+}
+
+/** A row or column of a table or matrix: a copy for measuring and framing, whose style changes also reach the entries. */
+class GridSlice extends Mobject {}
+for (const name of ["setColor", "setFill", "setFillColor", "setFillOpacity", "setStroke", "setStrokeColor", "setStrokeWidth", "setStrokeOpacity", "setOpacity", "fade"]) {
+  const f = function (...a) {
+    Mobject.prototype[name].apply(this, a);
+    for (const v of this._members) Mobject.prototype[name].apply(v, a);
+    return this;
+  };
+  GridSlice.prototype[name] = f;
+  GridSlice.prototype[name.replace(/[A-Z]/g, (c) => "_" + c.toLowerCase())] = f;
+}
+function gridSlice(members) {
+  const copies = members.map((v) => v.copy());
+  const s = wrap(copies.length ? N.group(JSON.stringify(copies.map((c) => c._h))) : mk("VGroup", {}), GridSlice.prototype);
+  s._members = members;
+  return s;
+}
+
+/** A group whose members are text-like (table entries, code lines): `get(i)` gives text helpers. */
+class TextGroup extends Mobject {
+  get(i) { return wrap(N.child(this._h, i), TextMobject.prototype); }
+}
+
+/** Shared by Table and Matrix. Positions are 1-based [row, col], labels included. */
+class GridMobject extends Mobject {
+  _grid() {
+    const g = this._q("gridInfo");
+    if (!g) throw new Error("this mobject is not a table or a matrix");
+    return g;
+  }
+  /** Every entry (a live group, row by row), or the entry at [row, col]. */
+  getEntries(pos) {
+    const g = this._grid(), e = wrap(N.child(this._h, g.entries), TextGroup.prototype);
+    if (pos == null) return e;
+    const [r, c] = cellPos(pos);
+    if (r < 1 || c < 1 || r > g.rows || c > g.cols) throw new RangeError(`no cell [${r}, ${c}] in a ${g.rows}×${g.cols} grid`);
+    return e.get((r - 1) * g.cols + (c - 1));
+  }
+  /** Entries as rows of live mobjects. */
+  getMobMatrix() {
+    const g = this._grid(), e = this.getEntries(), out = [];
+    for (let r = 0; r < g.rows; r++) {
+      const row = [];
+      for (let c = 0; c < g.cols; c++) row.push(e.get(r * g.cols + c));
+      out.push(row);
+    }
+    return out;
+  }
+  getRows() { return this.getMobMatrix().map(gridSlice); }
+  getColumns() { const m = this.getMobMatrix(); return (m[0] ?? []).map((_, c) => gridSlice(m.map((row) => row[c]))); }
+  getEntriesWithoutLabels() { const g = this._grid(); return this.getMobMatrix().slice(g.colLabels ? 1 : 0).flatMap((r) => r.slice(g.rowLabels ? 1 : 0)); }
+  getRowLabels() { const g = this._grid(); return g.rowLabels ? this.getMobMatrix().slice(g.colLabels ? 1 : 0).map((r) => r[0]) : []; }
+  getColLabels() { const g = this._grid(); return g.colLabels ? this.getMobMatrix()[0].slice(g.rowLabels ? 1 : 0) : []; }
+  getLabels() { return [...this.getRowLabels(), ...this.getColLabels()]; }
+  /** One color per row (labels included). */
+  setRowColors(...colors) { return this._op("setRowColors", colors); }
+  /** One color per column (labels included). */
+  setColumnColors(...colors) { return this._op("setColumnColors", colors); }
+  /** The outline of a cell, as a new polygon. */
+  getCell(pos, o) { return wrap(mk("TableCell", { ...opts(o), target: this, pos: cellPos(pos) }), Mobject.prototype); }
+  /** A filled rectangle covering a cell, as a new mobject. */
+  getHighlightedCell(pos, o) {
+    const p = typeof o === "string" ? { color: o } : opts(o);
+    return wrap(mk("TableHighlightedCell", { ...p, target: this, pos: cellPos(pos) }), Mobject.prototype);
+  }
+  /** Put a highlight (default PURE_YELLOW) behind a cell. */
+  addHighlightedCell(pos, o) {
+    const p = typeof o === "string" ? { color: o } : opts(o);
+    return this._op("addHighlightedCell", cellPos(pos), p.color ?? PURE_YELLOW);
+  }
+  addBackgroundToEntries(color = BLACK) {
+    if (color && typeof color === "object" && !Array.isArray(color)) color = opts(color).color ?? BLACK;
+    return this._op("addBackgroundToEntries", color);
+  }
+  _part(i) { return i == null ? VGroup() : this.get(i); }
+  getHorizontalLines() { return this._part(this._grid().hlines); }
+  getVerticalLines() { return this._part(this._grid().vlines); }
+  /** A matrix's [left, right] brackets (a live group). */
+  getBrackets() { return this._part(this._grid().brackets); }
+}
+
+class TableMobject extends GridMobject {
+  get horizontalLines() { return this.getHorizontalLines(); }
+  get verticalLines() { return this.getVerticalLines(); }
+  /** Manim's `table.create()`: lines, then entries, then labels. Adds the table to the scene. */
+  create(o) {
+    const p = opts(o);
+    const lag = p.lagRatio ?? 1;
+    delete p.lagRatio;
+    currentScene().add(this);
+    const parts = [AnimationGroup(Create(this.getVerticalLines(), p), Create(this.getHorizontalLines(), p))];
+    const entries = this.getEntriesWithoutLabels();
+    if (entries.length) parts.push(AnimationGroup(...entries.map((e) => Create(e, p))));
+    const labels = this.getLabels();
+    if (labels.length) parts.push(AnimationGroup(...labels.map((l) => Write(l, p))));
+    return LaggedStart(...parts, { lagRatio: lag });
+  }
+}
+
+const tableKind = (kind) => (rows, o) => mk(kind, nested({ ...opts(o), table: rows }, "elementToMobjectConfig", "lineConfig"));
+/** A table of text entries (`\n` breaks lines). Options: rowLabels, colLabels, topLeftEntry, vBuff, hBuff, includeOuterLines, ... */
+export const Table = defineMobject("Table", TableMobject, tableKind("Table"));
+/** A table of equations (Typst math syntax). */
+export const MathTable = defineMobject("MathTable", TableMobject, tableKind("MathTable"));
+export const IntegerTable = defineMobject("IntegerTable", TableMobject, tableKind("IntegerTable"));
+/** Decimal entries; `elementToMobjectConfig: { numDecimalPlaces }` (default 1). */
+export const DecimalTable = defineMobject("DecimalTable", TableMobject, tableKind("DecimalTable"));
+export const MobjectTable = defineMobject("MobjectTable", TableMobject, tableKind("MobjectTable"));
+
+const matrixKind = (kind) => (rows, o) => mk(kind, nested({ ...opts(o), matrix: rows }, "elementToMobjectConfig", "bracketConfig"));
+/** A matrix of equations (Typst math syntax: "pi", "x^2") in brackets. Options: leftBracket, rightBracket, vBuff, hBuff, ... */
+export const Matrix = defineMobject("Matrix", GridMobject, matrixKind("Matrix"));
+export const IntegerMatrix = defineMobject("IntegerMatrix", GridMobject, matrixKind("IntegerMatrix"));
+/** Decimal entries; `elementToMobjectConfig: { numDecimalPlaces }` (default 1). */
+export const DecimalMatrix = defineMobject("DecimalMatrix", GridMobject, matrixKind("DecimalMatrix"));
+export const MobjectMatrix = defineMobject("MobjectMatrix", GridMobject, matrixKind("MobjectMatrix"));
+/** "det" left of a matrix, and "= determinant" right of it when given. */
+export function getDetText(matrix, o) {
+  const p = typeof o === "object" && o !== null ? opts(o) : { determinant: o };
+  return wrap(mk("DetText", { target: matrix, determinant: p.determinant }), Mobject.prototype);
+}
+export const get_det_text = getDetText;
+
+class CodeMobject extends Mobject {
+  _kindPart(kind, proto) { const i = this._q("childIndexOfKind", kind); return i == null ? null : wrap(N.child(this._h, i), proto); }
+  /** One live text group per line: `code.codeLines.get(2)` is the third line. */
+  get codeLines() { return this._kindPart("CodeLines", TextGroup.prototype); }
+  /** One live group per line number (null without line numbers). */
+  get lineNumbers() { return this._kindPart("CodeLineNumbers", TextGroup.prototype); }
+  /** The background (with the window buttons as members). */
+  get background() { return this._kindPart("CodeBackground", Mobject.prototype); }
+}
+/**
+ * A syntax-highlighted listing. `Code({ codeString, language, formatterStyle, background: "window" })`,
+ * `Code("path/to/file.py")`, or `Code(sourceText, options)`.
+ */
+export const Code = defineMobject("Code", CodeMobject, (a, o) => {
+  let p;
+  if (typeof a === "string") {
+    // A lone path-looking string is a file; anything else is source code.
+    const isFile = /^[^\s()"'=;{}<>]+\.[A-Za-z0-9]+$/.test(a);
+    p = { ...opts(o), [isFile ? "codeFile" : "codeString"]: a };
+  } else p = opts(a);
+  return mk("Code", nested(p, "backgroundConfig", "paragraphConfig"));
+});
+/** Names of the color styles (Pygments' names: "vim", "monokai", "dracula", ...). */
+Code.getStylesList = () => JSON.parse(N.codeStyles());
+Code.get_styles_list = Code.getStylesList;
+/** Languages the highlighter knows. */
+Code.getLanguages = () => JSON.parse(N.codeLanguages());
+Code.get_languages = Code.getLanguages;
+
 /** A number that animations can change (`tracker.animate.setValue(5)`). */
 export class ValueTracker {
   constructor(value = 0) { this._id = N.trackerNew(value); }
@@ -575,7 +739,7 @@ export const linear = "linear", smooth = "smooth", rushInto = "rush_into", rushF
 export const rate_functions = { linear, smooth, rush_into: rushInto, rush_from: rushFrom, slow_into: slowInto, double_smooth: doubleSmooth, there_and_back: thereAndBack, wiggle, lingering, ease_in_out_sine: easeInOutSine, ease_out_back: easeOutBack, ease_out_bounce: easeOutBounce };
 
 // snake_case aliases for Python habits (move_to, next_to, set_color, ...).
-for (const proto of [Mobject.prototype, TextMobject.prototype, Scene.prototype]) {
+for (const proto of [Mobject.prototype, TextMobject.prototype, Scene.prototype, GridMobject.prototype, TableMobject.prototype, CodeMobject.prototype]) {
   for (const name of Object.getOwnPropertyNames(proto)) {
     if (name.startsWith("_") || name === "constructor") continue;
     const snake = name.replace(/[A-Z]/g, (c) => "_" + c.toLowerCase());

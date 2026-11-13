@@ -263,3 +263,186 @@ fn rate_functions_are_bounded_and_continuous() {
         }
     }
 }
+
+// ---------------------------------------------------------------------- Table, Matrix, Code
+
+fn hex_color(h: &str) -> Color {
+    Color::hex(h).unwrap()
+}
+
+#[test]
+fn table_matches_manims_layout() {
+    let t = Table::new([["First", "Second"], ["Third", "Fourth"]])
+        .row_labels(vec![Text::new("R1"), Text::new("R2")])
+        .col_labels(vec![Text::new("C1"), Text::new("C2")])
+        .build()
+        .unwrap();
+    let g = t.grid().unwrap();
+    assert_eq!((g.rows, g.cols, g.row_labels, g.col_labels), (3, 3, true, true));
+    assert_eq!(t.meta.kind(), "Table");
+    assert_eq!(t.get_entry(2, 2).unwrap().text(), Some("First"));
+    assert_eq!(t.get_entry(1, 3).unwrap().text(), Some("C2"));
+    assert!(t.get_entry(1, 1).unwrap().bounding_box().is_none(), "empty top-left placeholder");
+    assert!(t.get_entry(4, 1).is_none());
+    // Inner lines only by default: 2 between 3 rows, 2 between 3 columns.
+    assert_eq!(t.get_horizontal_lines().children.len(), 2);
+    assert_eq!(t.get_vertical_lines().children.len(), 2);
+    // Every horizontal line spans the table plus half an h_buff on each side.
+    let e = t.get_entries();
+    for l in &t.get_horizontal_lines().children {
+        assert!((l.get_left().x - (e.get_left().x - 0.65)).abs() < 1e-9);
+        assert!((l.get_right().x - (e.get_right().x + 0.65)).abs() < 1e-9);
+    }
+    // Entries in a column share a center x; entries in a row share a center y.
+    let a = t.get_entry(2, 2).unwrap().get_center();
+    let b = t.get_entry(3, 2).unwrap().get_center();
+    let c = t.get_entry(2, 3).unwrap().get_center();
+    assert!((a.x - b.x).abs() < 1e-9 && (a.y - c.y).abs() < 1e-9);
+    // Rows are v_buff apart (between the tallest entries).
+    let rows = t.get_rows();
+    assert!((rows.children[1].get_bottom().y - rows.children[2].get_top().y - 0.8).abs() < 1e-6);
+    assert_eq!(t.get_labels().children.len(), 4);
+    assert_eq!(t.get_entries_without_labels().children.len(), 4);
+    assert!(t.get_center().length() < 1e-9, "centered like Manim");
+}
+
+#[test]
+fn table_cells_highlights_and_colors() {
+    let t = Table::new([["a", "b"], ["c", "d"]]).include_outer_lines(true).build().unwrap();
+    assert_eq!(t.get_horizontal_lines().children.len(), 3);
+    assert_eq!(t.get_vertical_lines().children.len(), 3);
+    // The cell outline meets the grid lines.
+    let cell = t.get_cell(1, 1);
+    let lines = VMobject::group([t.get_horizontal_lines().children, t.get_vertical_lines().children].concat());
+    assert!((cell.get_left().x - lines.get_left().x).abs() < 1e-9);
+    assert!((cell.get_top().y - lines.get_top().y).abs() < 1e-9);
+    let inner = &t.get_horizontal_lines().children[2];
+    assert!((cell.get_bottom().y - inner.get_center().y).abs() < 1e-9);
+    // Highlights go behind everything and follow later transforms.
+    let t = t.add_highlighted_cell(2, 2, GREEN).scale(0.5).shift(RIGHT * 2.0);
+    let hl = &t.children[0].children[0];
+    assert_eq!(hl.fill_color, GREEN);
+    assert!((hl.fill_opacity - 0.75).abs() < 1e-9);
+    assert!((hl.width() - t.get_cell(2, 2).width()).abs() < 1e-9, "buffers scale with the table");
+    assert!((hl.get_center() - t.get_cell(2, 2).get_center()).length() < 1e-9);
+    let t = t.set_column_colors(&[RED, BLUE]).set_row_colors(&[YELLOW]);
+    assert_eq!(t.get_entry(1, 2).unwrap().leaves()[0].fill_color, YELLOW);
+    assert_eq!(t.get_entry(2, 2).unwrap().leaves()[0].fill_color, BLUE);
+    assert!(Table::new([vec!["a", "b"], vec!["c"]]).build().is_err(), "ragged rows");
+    let nums = Table::decimals([[1.25, 2.0]], 1).build().unwrap();
+    assert_eq!(nums.get_entry(1, 1).unwrap().text(), Some("1.2"));
+}
+
+#[test]
+fn matrix_matches_manims_geometry() {
+    let m = Matrix::new([["2", "pi"], ["-1", "1"]]).unwrap().build();
+    assert_eq!(m.meta.kind(), "Matrix");
+    // Digits as tall as Manim CE's at font size 48 (0.333 units).
+    let one = m.get_entry(2, 2).unwrap();
+    assert!((one.height() - 0.333).abs() < 0.01, "digit height {}", one.height());
+    // Bottom-right corners on a 1.3 × 0.8 lattice.
+    let a = m.get_entry(1, 1).unwrap().get_corner(DR);
+    let b = m.get_entry(2, 2).unwrap().get_corner(DR);
+    assert!((b.x - a.x - 1.3).abs() < 1e-9 && (a.y - b.y - 0.8).abs() < 1e-9);
+    // Brackets: entries' height + 2 × 0.25, 0.25 away from the entries.
+    let br = m.get_brackets();
+    let e = m.get_entries();
+    for k in &br.children {
+        assert!((k.height() - (e.height() + 0.5)).abs() < 1e-6);
+        assert!((k.get_center().y - e.get_center().y).abs() < 1e-6);
+    }
+    assert!((e.get_left().x - br.children[0].get_right().x - 0.25).abs() < 1e-9);
+    assert!((br.children[1].get_left().x - e.get_right().x - 0.25).abs() < 1e-9);
+    assert_eq!(m.get_columns().children[1].children.len(), 2);
+    // Other brackets, integer and decimal entries.
+    for (l, r) in [("(", ")"), ("{", "}"), ("|", "|"), ("\\langle", "\\rangle"), ("||", "||")] {
+        let m = Matrix::integers([[1, 2], [3, 4]]).brackets(l, r).build();
+        let br = m.get_brackets();
+        assert!(br.children.iter().all(|b| b.height() > 0.9 && b.width() < 0.45), "{l}{r}");
+    }
+    let im = Matrix::integers([[10, -2]]).build();
+    assert_eq!(im.get_entry(1, 2).unwrap().text(), Some("\u{2212}2"));
+    let dm = Matrix::decimals([[1.25]], 2).build();
+    assert_eq!(dm.get_entry(1, 1).unwrap().text(), Some("1.25"));
+    let none = Matrix::integers([[1]]).brackets(".", ".").build();
+    assert!(none.get_brackets().bounding_box().is_none());
+    let det = manim::mobject::matrix::get_det_text(&m, Some("-2")).unwrap();
+    assert_eq!(det.children.len(), 5);
+    assert!(det.get_left().x < m.get_left().x && det.get_right().x > m.get_right().x);
+}
+
+const PY: &str = "from manim import Scene\n\nclass A(Scene):\n    def construct(self):\n        self.wait(1)  # done\n";
+
+#[test]
+fn code_highlights_like_pygments() {
+    let c = Code::new(PY).language("python").build().unwrap();
+    assert_eq!(c.meta.kind(), "Code");
+    let kinds: Vec<&str> = c.children.iter().map(|k| k.meta.kind()).collect();
+    assert_eq!(kinds, ["CodeBackground", "CodeLineNumbers", "CodeLines"]);
+    let lines = c.child_of_kind("CodeLines").unwrap();
+    assert_eq!(lines.children.len(), 5, "the trailing newline is dropped");
+    assert_eq!(lines.children[3].text(), Some("    def construct(self):"));
+    assert!(lines.children[1].children.is_empty(), "blank line");
+    // Manim's default "vim" style: keywords #cdcd00, class names #00cdcd, self #cd00cd, ...
+    let glyph = |m: &VMobject, i: usize| m.chars(i, i + 1).leaves()[0].fill_color;
+    let line = &lines.children[3];
+    assert_eq!(glyph(line, 4), hex_color("#cdcd00"), "def");
+    assert_eq!(glyph(line, 8), hex_color("#cccccc"), "construct (vim leaves function names plain)");
+    assert_eq!(glyph(line, 18), hex_color("#cd00cd"), "self");
+    assert_eq!(glyph(&lines.children[0], 0), hex_color("#cd00cd"), "from");
+    assert_eq!(glyph(&lines.children[2], 6), hex_color("#00cdcd"), "class name");
+    assert_eq!(glyph(&lines.children[4], 22), hex_color("#000080"), "comment");
+    assert_eq!(glyph(&lines.children[4], 18), hex_color("#cd00cd"), "number");
+    // Line numbers: one per line, left of the code, on the lines' baselines.
+    let nums = c.child_of_kind("CodeLineNumbers").unwrap();
+    assert_eq!(nums.children.len(), 5);
+    assert_eq!(nums.children[4].text(), Some("5"));
+    assert!(nums.get_right().x < lines.get_left().x);
+    let pitch = nums.children[0].get_bottom().y - nums.children[1].get_bottom().y;
+    assert!((pitch - 24.0 * 0.015 * 1.04).abs() < 1e-6, "pitch {pitch}");
+    let base = |m: &VMobject, i: usize| m.chars(i, i + 1).get_bottom().y;
+    assert!((base(&lines.children[2], 0) - nums.children[2].get_bottom().y).abs() < 0.02);
+    // Background: the style's color, white outline, 0.3 around everything.
+    let bg = c.child_of_kind("CodeBackground").unwrap();
+    assert_eq!(bg.fill_color, hex_color("#000000"));
+    assert_eq!(bg.stroke_color, WHITE);
+    let content = VMobject::group(vec![nums.clone(), lines.clone()]);
+    assert!(bg.get_left().x < content.get_left().x - 0.29 && bg.get_right().x > content.get_right().x + 0.29);
+}
+
+#[test]
+fn code_options() {
+    let w = Code::new(PY).background(CodeBackground::Window).style("monokai").line_numbers(false).build().unwrap();
+    assert!(w.child_of_kind("CodeLineNumbers").is_none());
+    let bg = w.child_of_kind("CodeBackground").unwrap();
+    assert_eq!(bg.children[0].children.len(), 3, "window buttons (one group, as in Manim)");
+    assert_eq!(bg.fill_color, hex_color("#272822"));
+    let from = Code::new("a\nb\n").line_numbers_from(9).build().unwrap();
+    assert_eq!(from.child_of_kind("CodeLineNumbers").unwrap().children[1].text(), Some("10"));
+    assert!(Code::new("x").language("cobol").build().is_err());
+    assert!(Code::new("x").style("nope").build().is_err());
+    assert!(Code::styles().contains(&"dracula"));
+    // Tabs expand to the tab width; a file's language comes from its extension.
+    let tabs = Code::new("\tx").tab_width(2).build().unwrap();
+    assert_eq!(tabs.child_of_kind("CodeLines").unwrap().children[0].text(), Some("  x"));
+    let dir = temp_dir("code-file");
+    let path = dir.join("main.rs");
+    std::fs::write(&path, "fn main() {}\n").unwrap();
+    let f = Code::from_file(&path).unwrap();
+    assert_eq!(f.language.as_deref(), Some("rust"));
+    let built = f.build().unwrap();
+    let line = &built.child_of_kind("CodeLines").unwrap().children[0];
+    assert_eq!(line.chars(0, 1).leaves()[0].fill_color, hex_color("#cdcd00"), "fn is a keyword");
+}
+
+#[test]
+fn table_matrix_and_code_animate() {
+    run("tmc-animate", |s| {
+        let t = s.add(Table::new([["a", "b"]]).build().unwrap().shift(UP * 2.0));
+        let m = s.add(Matrix::integers([[1, 2], [3, 4]]).build());
+        let c = s.add(Code::new(PY).build().unwrap().scale(0.5).shift(DOWN * 2.0));
+        s.play(anims![Create::new(t), Write::new(m), FadeIn::new(c)]);
+        s.modify(t, |t| t.add_highlighted_cell(1, 1, YELLOW));
+        s.play(Transform::new(m, Matrix::integers([[5, 6], [7, 8]]).build()));
+    });
+}

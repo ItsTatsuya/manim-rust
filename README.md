@@ -203,6 +203,11 @@ Set `MANIM_TRACE=1` to print where each pipeline stage spent its time.
   (`part`, `chars`, `set_color_text`), `DecimalNumber`, `Integer`.
 - **Math:** `MathTex` and `Typst` typeset by an embedded Typst compiler (Typst math syntax;
   no TeX installation).
+- **Tables, matrices, code:** `Table` (+ `MathTable`, `IntegerTable`, `DecimalTable`,
+  `MobjectTable`) with labels, grid lines, cells and highlights; `Matrix` (+ `IntegerMatrix`,
+  `DecimalMatrix`, `MobjectMatrix`) with `[ ( { | ‖ ⟨` brackets, row/column colors and
+  `get_det_text`; `Code` with built-in syntax highlighting for 14 languages, Pygments'
+  color styles, line numbers and a window background. Laid out like Manim.
 - **Animations:** `Create`, `Uncreate`, `DrawBorderThenFill`, `Write`, `ShowPassingFlash`,
   `Transform` (+ `path_arc`), `ReplacementTransform`, `TransformFromCopy`, `.animate`,
   `FadeIn` / `FadeOut` (+ `shift`, `scale`), `GrowFromCenter`, `GrowFromPoint`,
@@ -219,9 +224,8 @@ Set `MANIM_TRACE=1` to print where each pipeline stage spent its time.
 
 ## What's missing
 
-3D scenes, camera animation (`MovingCameraScene`), `Table`, `Matrix`, `Code`, LaTeX
-syntax for equations (Typst syntax is used instead), and Python bindings. Contributions
-are welcome.
+3D scenes, camera animation (`MovingCameraScene`), LaTeX syntax for equations (Typst
+syntax is used instead), and Python bindings. Contributions are welcome.
 
 ## Quality
 

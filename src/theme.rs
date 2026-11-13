@@ -254,6 +254,7 @@ impl Theme {
             font: self.fonts.body.clone(),
             font_size: self.sizes.body,
             fallback_fonts: self.fonts.fallback.clone(),
+            code_font: self.fonts.code.clone(),
         }
     }
 
