@@ -26,7 +26,7 @@ It renders the same scenes **5–13× faster at 480p** and **3–15× faster at 
 | Rendering a file | `manim -qh scene.py MyScene` | `manim-rs scene.rs -qh` (compiled in a hidden cache; no `.exe` left behind) |
 | Mobject references | Shared mutable Python objects | Copyable `MobjectId` handles into a scene-owned arena |
 | `.animate` | `sq.animate.shift(RIGHT)` | `sq.animate(\|m\| m.shift(RIGHT))` |
-| CPU renderer | Cairo, one frame at a time | tiny-skia, **frames rasterized in parallel on all cores** |
+| CPU renderer | Cairo, one frame at a time | tiny-skia + vello_cpu, **frames rasterized in parallel on all cores**, faster rasterizer picked per frame |
 | GPU renderer | OpenGL (separate code path, different features) | wgpu (Vulkan / DX12 / Metal), same features as CPU |
 | Renderer choice | Manual (`--renderer`) | `auto` **times both on your scene and keeps the faster** |
 | Text | Pango + Cairo | System fonts via fontdb + ttf-parser; one mobject per glyph |
@@ -147,7 +147,7 @@ same layout Manim uses. Pass `-o <dir>` for a flat `<dir>/<Scene>.mp4`.
 
 To run the bundled examples from a clone: `cargo run --release --example square_to_circle -- -ql`.
 
-**Requirements:** Rust 1.87+ (to build; `cargo build --profile dist` makes the smallest binary). ffmpeg for MP4 output: it's found on `PATH`, through
+**Requirements:** Rust 1.89+ (to build; `cargo build --profile dist` makes the smallest binary). ffmpeg for MP4 output: it's found on `PATH`, through
 `MANIM_FFMPEG`, via `--ffmpeg <path>`, or in winget's package folder on Windows. Without
 ffmpeg, output falls back to GIF. A GPU is optional.
 
@@ -173,7 +173,7 @@ Every scene binary accepts Manim-style flags:
 |---|---|
 | `-ql` `-qm` `-qh` `-qp` `-qk` | 480p15 · 720p30 · 1080p60 (default) · 1440p60 · 2160p60 |
 | `-s` | Render only the last frame, as a PNG (no intermediate frames are rasterized) |
-| `--renderer auto\|cpu\|gpu` | `auto` (default) benchmarks both on live frames at ≥1080p and keeps the faster |
+| `--renderer auto\|cpu\|gpu\|skia\|vello` | `auto` (default) benchmarks CPU and GPU on live frames at ≥1080p and keeps the faster. `cpu` times tiny-skia against vello per complexity bucket; `skia`/`vello` force one |
 | `--format auto\|mp4\|gif\|png\|none` | `auto` = MP4 if ffmpeg is found, else GIF. `none` renders and discards frames |
 | `--encoder auto\|x264\|nvenc\|qsv\|amf` | `auto` = first working hardware encoder at ≥1080p30, else x264 |
 | `-o PATH` | Write `PATH/<Scene>.mp4` (or exactly `PATH` if it has an extension) instead of `media/` |

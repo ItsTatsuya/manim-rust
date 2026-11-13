@@ -3,7 +3,7 @@
 mod common;
 
 use manim::prelude::*;
-use manim::renderer::cpu::{rasterize, CpuRenderer};
+use manim::renderer::cpu::{rasterize, CpuRenderer, Raster};
 use manim::renderer::{DisplayList, Renderer};
 
 const W: u32 = 160;
@@ -89,9 +89,32 @@ fn z_order_paints_last_on_top() {
 fn rendering_is_deterministic() {
     let dl = frame(vec![Circle::new(2.0).set_fill(PINK, 0.4), Text::new("abc"), Star::new(5, 1.0, 0.4)]);
     assert_eq!(rasterize(&dl), rasterize(&dl));
-    let mut r = CpuRenderer::new();
+    for raster in [Raster::Skia, Raster::Vello] {
+        let mut r = CpuRenderer::with_raster(raster);
+        let batch = r.render_batch(&[&dl, &dl, &dl]).unwrap();
+        assert!(batch.iter().all(|f| *f == batch[0]), "{raster:?}");
+    }
+    // Adaptive alternates rasterizers while calibrating, then sticks to one per bucket.
+    let mut r = CpuRenderer::with_raster(Raster::Adaptive);
+    r.render_batch(&[&dl; 8]).unwrap();
     let batch = r.render_batch(&[&dl, &dl, &dl]).unwrap();
-    assert!(batch.iter().all(|f| *f == batch[0]));
+    assert!(batch.iter().all(|f| *f == batch[0]), "adaptive after calibration");
+}
+
+#[test]
+fn vello_matches_tiny_skia() {
+    // Same geometry and colors; only anti-aliasing along edges may differ.
+    let dl = frame(vec![
+        Circle::new(2.0).set_fill(PINK, 0.4),
+        Square::new(3.0).set_stroke(YELLOW, 8.0),
+        Star::new(5, 1.0, 0.4).set_fill(BLUE, 1.0),
+    ]);
+    let a = rasterize(&dl);
+    let b = CpuRenderer::with_raster(Raster::Vello).render_batch(&[&dl]).unwrap().remove(0);
+    let off = a.iter().zip(&b).filter(|(x, y)| x.abs_diff(**y) > 8).count();
+    assert!(off * 100 < a.len(), "{off} of {} channels differ", a.len());
+    let [r, g, bl, _] = px(&a, W / 2, H / 2);
+    assert!(near(px(&b, W / 2, H / 2), [r, g, bl], 2), "interior color matches");
 }
 
 #[test]

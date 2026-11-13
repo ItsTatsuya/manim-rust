@@ -154,7 +154,9 @@ pub const HELP: &str = "\
 Options:
   -ql, -qm, -qh, -qp, -qk   Quality: 480p15, 720p30, 1080p60 (default), 1440p60, 2160p60
   -s, --save_last_frame     Only render and save the final frame as PNG
-  --renderer auto|cpu|gpu   Rendering backend (default auto: hardware GPU if available)
+  --renderer auto|cpu|gpu|skia|vello
+                            Rendering backend (default auto: times CPU and GPU, keeps the
+                            faster; cpu picks tiny-skia or vello per frame)
   --format FMT              auto|mp4|gif|png|none (default auto: mp4 if ffmpeg is on PATH,
                             else gif; none renders but discards frames, for benchmarking)
   --encoder auto|x264|nvenc|qsv|amf

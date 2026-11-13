@@ -2,10 +2,13 @@
 //!
 //! Scenes produce [`DisplayList`]s (pixel-space Bézier paths with style). A [`Renderer`]
 //! rasterizes batches of them into RGBA8 frames:
-//! - [`cpu::CpuRenderer`]: tiny-skia, one frame per core in parallel (rayon).
+//! - [`cpu::CpuRenderer`]: one frame per core in parallel (rayon), on tiny-skia or (feature
+//!   `vello`) vello_cpu, choosing per frame by measured speed.
 //! - `gpu::GpuRenderer` (feature `gpu`): wgpu + lyon tessellation, 4× MSAA.
 
 pub mod cpu;
+#[cfg(feature = "vello")]
+pub mod vello;
 #[cfg(feature = "gpu")]
 pub mod gpu;
 
@@ -92,7 +95,12 @@ pub trait Renderer: Send {
 pub enum RendererKind {
     /// Hardware GPU if one is found, otherwise CPU.
     Auto,
+    /// The CPU rasterizer that measures fastest (tiny-skia or vello, per frame).
     Cpu,
+    /// tiny-skia only: the reference rasterizer, deterministic output.
+    Skia,
+    /// vello_cpu only (frames with images still go to tiny-skia).
+    Vello,
     Gpu,
 }
 
@@ -101,9 +109,11 @@ impl std::str::FromStr for RendererKind {
     fn from_str(s: &str) -> Result<Self> {
         match s.to_ascii_lowercase().as_str() {
             "auto" => Ok(RendererKind::Auto),
-            "cpu" | "cairo" | "skia" => Ok(RendererKind::Cpu),
+            "cpu" | "cairo" => Ok(RendererKind::Cpu),
+            "skia" | "tiny-skia" => Ok(RendererKind::Skia),
+            "vello" => Ok(RendererKind::Vello),
             "gpu" | "opengl" | "wgpu" => Ok(RendererKind::Gpu),
-            _ => anyhow::bail!("unknown renderer '{s}' (expected auto, cpu or gpu)"),
+            _ => anyhow::bail!("unknown renderer '{s}' (expected auto, cpu, skia, vello or gpu)"),
         }
     }
 }
@@ -118,6 +128,11 @@ impl std::str::FromStr for RendererKind {
 pub fn create(kind: RendererKind, width: u32, height: u32) -> Result<Box<dyn Renderer>> {
     match kind {
         RendererKind::Cpu => Ok(Box::new(cpu::CpuRenderer::new())),
+        RendererKind::Skia => Ok(Box::new(cpu::CpuRenderer::with_raster(cpu::Raster::Skia))),
+        #[cfg(feature = "vello")]
+        RendererKind::Vello => Ok(Box::new(cpu::CpuRenderer::with_raster(cpu::Raster::Vello))),
+        #[cfg(not(feature = "vello"))]
+        RendererKind::Vello => anyhow::bail!("vello renderer requested but manim was built without the `vello` feature"),
         #[cfg(feature = "gpu")]
         RendererKind::Gpu => Ok(Box::new(gpu::GpuRenderer::new(width, height, false)?)),
         #[cfg(not(feature = "gpu"))]

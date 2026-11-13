@@ -8,13 +8,16 @@ readme = "README.md"
 repository = "https://github.com/ItsTatsuya/manim-rust"
 keywords = ["manim", "animation", "math", "video", "visualization"]
 categories = ["multimedia::video", "graphics", "visualization"]
-rust-version = "1.87"
+rust-version = "1.89"
 publish = false
 
 [features]
-default = ["gpu", "text", "svg", "math", "script"]
+default = ["gpu", "vello", "text", "svg", "math", "script"]
 # wgpu-based renderer (Vulkan / DX12 / Metal). Auto-selected when a hardware GPU is found.
 gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck", "dep:lyon"]
+# Second CPU rasterizer (vello_cpu). `--renderer cpu` times it against tiny-skia per
+# complexity bucket and keeps the faster: ~3x faster than tiny-skia on heavy scenes.
+vello = ["dep:vello_cpu"]
 # Text mobjects built from system font outlines.
 text = ["dep:fontdb", "dep:ttf-parser", "dep:rustybuzz"]
 # SVGMobject (usvg).
@@ -48,6 +51,8 @@ typst-layout = { version = "0.15", optional = true }
 rquickjs = { version = "0.14", optional = true, features = ["loader", "macro"] }
 oxc = { version = "0.158", optional = true, features = ["transformer", "codegen", "semantic"] }
 typst-assets = { version = "0.15", optional = true, features = ["fonts"] }
+yuvutils-rs = { version = "0.8.3", features = ["rayon"] }
+vello_cpu = { version = "0.4", default-features = false, features = ["std", "u8_pipeline"], optional = true }
 
 [[example]]
 name = "features"
@@ -71,7 +76,7 @@ required-features = ["text"]
 
 [[test]]
 name = "rendering"
-required-features = ["text"]
+required-features = ["text", "vello"]
 
 # Keep dependencies (rasterizers, encoders) fast even in debug builds.
 [profile.dev.package."*"]
@@ -86,3 +91,4 @@ inherits = "release"
 lto = "thin"
 codegen-units = 1
 panic = "abort"
+

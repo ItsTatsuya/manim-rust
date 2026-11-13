@@ -4,7 +4,7 @@
             scene thread                     render thread                 encode thread       ffmpeg
  ┌──────────────────────────────┐   ┌─────────────────────────────┐   ┌──────────────────┐   ┌────────┐
  │ construct closure            │   │ Renderer::render_batch       │   │ RGBA → YUV 4:2:0 │   │ x264 / │
- │  play/wait → Animation.apply │──►│  CPU: rayon × tiny-skia      │──►│ (rayon, BT.601/  │──►│ NVENC  │
+ │  play/wait → Animation.apply │──►│  CPU: rayon × skia|vello     │──►│ (rayon, BT.601/  │──►│ NVENC  │
  │  updaters                    │   │  GPU: lyon → wgpu → readback │   │  BT.709)         │   │        │
  │  Camera → DisplayList        │   │  Auto: time both, keep best  │   │ GIF / PNG writer │   └────────┘
  │  dedup identical frames      │   └─────────────────────────────┘   └──────────────────┘
@@ -54,8 +54,12 @@ trait Animation {
   Cairo Manim). Non-finite geometry is dropped here.
 - `DisplayList` derives `PartialEq`, which is how identical frames are detected cheaply
   before any pixels are touched.
-- **CPU:** each frame of a batch goes to a rayon worker that builds a tiny-skia path,
-  fills it (even-odd) and strokes it (round joins and caps).
+- **CPU:** each frame of a batch goes to a rayon worker. Two rasterizers are compiled in:
+  tiny-skia (lowest fixed cost per frame) and vello_cpu (sparse strips + SIMD; ~3× faster
+  once a frame has a couple of thousand curves, ~15% slower on light frames). `--renderer cpu`
+  buckets frames by ⌊log2(curves)⌋, times both on the first 3 frames of each bucket and then
+  uses the faster one for that bucket. Frames with raster images always use tiny-skia.
+  Tests and `-s` snapshots use tiny-skia only, so their output is deterministic.
 - **GPU:** frames are tessellated in parallel with lyon into one vertex/index buffer per
   frame (NDC coordinates and per-vertex color), drawn in one call with alpha blending in
   sRGB space into a 4× MSAA target, resolved, then copied to a mapped buffer. Chunks of 8
@@ -70,7 +74,7 @@ trait Animation {
    `(DisplayList, repeat_count)`. The last entry is held back so a following identical
    frame only bumps its count.
 2. **Render thread:** rasterizes batches (`Renderer::batch_size`), then sends `Arc` frames on.
-3. **Encode thread:** converts to YUV and writes each frame `repeat` times to ffmpeg's
+3. **Encode thread:** converts to YUV with yuvutils-rs (SIMD, ~16× less CPU than the scalar loop it replaced, which matters because it shares cores with x264) and writes each frame `repeat` times to ffmpeg's
    stdin, or merges repeats into one GIF frame with a longer delay.
 
 All channels are bounded, so a slow encoder applies backpressure instead of buffering

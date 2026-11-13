@@ -4,13 +4,13 @@ use std::path::PathBuf;
 
 use manim::prelude::*;
 
-/// Small, fast, deterministic settings: CPU renderer, frames rendered but discarded.
+/// Small, fast, deterministic settings: tiny-skia renderer, frames rendered but discarded.
 pub fn test_config(name: &str) -> Config {
     Config {
         pixel_width: 160,
         pixel_height: 90,
         fps: 10.0,
-        renderer: RendererKind::Cpu,
+        renderer: RendererKind::Skia,
         format: OutputFormat::None,
         media_dir: temp_dir(name),
         quiet: true,

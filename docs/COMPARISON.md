@@ -29,7 +29,7 @@ difference that matters when you use it.
 |---|---|---|
 | CPU backend | Cairo, sequential | tiny-skia, batches of frames rasterized in parallel (rayon) |
 | GPU backend | OpenGL renderer, a separate code path with its own feature gaps | wgpu (Vulkan / DX12 / Metal): lyon tessellation, 4× MSAA, pipelined readback. Same display list as the CPU path, so identical features |
-| Choosing a backend | `--renderer cairo\|opengl` | `--renderer auto\|cpu\|gpu`. `auto` rejects software adapters, then at ≥1080p times both backends on the scene's first frames and keeps the faster |
+| Choosing a backend | `--renderer cairo\|opengl` | `--renderer auto\|cpu\|gpu\|skia\|vello`. `auto` rejects software adapters, then at ≥1080p times both backends on the scene's first frames and keeps the faster. The CPU backend itself times tiny-skia against vello_cpu per path-complexity bucket |
 | Fill rule | Cairo winding | Even-odd for shapes; non-zero for glyphs and SVG paths (variable-font contours overlap) |
 | Anti-aliasing | Cairo analytic AA | CPU: analytic AA. GPU: 4× MSAA. Mean difference between the two is under 2/255 per channel (tested) |
 | Translucent strokes | Single pass | Single pass on CPU. On GPU, overlapping stroke joins can double-blend |

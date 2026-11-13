@@ -256,11 +256,10 @@ impl YuvMatrix {
         }
     }
 
-    /// Limited-range integer coefficients ×256 for (Y; U; V) rows.
-    fn coeffs(self) -> [[i32; 3]; 3] {
+    fn standard(self) -> yuvutils_rs::YuvStandardMatrix {
         match self {
-            YuvMatrix::Bt601 => [[66, 129, 25], [-38, -74, 112], [112, -94, -18]],
-            YuvMatrix::Bt709 => [[47, 157, 16], [-26, -86, 112], [112, -102, -10]],
+            YuvMatrix::Bt601 => yuvutils_rs::YuvStandardMatrix::Bt601,
+            YuvMatrix::Bt709 => yuvutils_rs::YuvStandardMatrix::Bt709,
         }
     }
 
@@ -273,42 +272,36 @@ impl YuvMatrix {
     }
 }
 
-/// RGBA8 → planar YUV 4:2:0 (limited range), converted in parallel.
-/// Doing this here instead of in ffmpeg's single-threaded swscale cuts encode time by
-/// about a third and the pipe traffic by 2.7×. `width` and `height` must be even.
+/// RGBA8 → planar YUV 4:2:0 (limited range), via yuvutils-rs (SIMD, rows split across
+/// rayon). Doing this here instead of in ffmpeg's single-threaded swscale cuts encode time
+/// and the pipe traffic by 2.7×. It is ~16× cheaper per frame than the scalar loop it
+/// replaced, which matters because it shares the CPU with x264. `width` and `height` must
+/// be even.
 pub fn rgba_to_yuv420(rgba: &[u8], width: usize, height: usize, matrix: YuvMatrix, out: &mut Vec<u8>) {
-    use rayon::prelude::*;
-    let [ky, ku, kv] = matrix.coeffs();
+    use yuvutils_rs::{BufferStoreMut, YuvConversionMode, YuvPlanarImageMut, YuvRange};
     let (cw, ch) = (width / 2, height / 2);
     out.resize(width * height + 2 * cw * ch, 0);
     let (y_plane, uv) = out.split_at_mut(width * height);
     let (u_plane, v_plane) = uv.split_at_mut(cw * ch);
-    let luma = |p: &[u8]| (((ky[0] * p[0] as i32 + ky[1] * p[1] as i32 + ky[2] * p[2] as i32 + 128) >> 8) + 16) as u8;
-    y_plane
-        .par_chunks_mut(width * 2)
-        .zip(u_plane.par_chunks_mut(cw).zip(v_plane.par_chunks_mut(cw)))
-        .enumerate()
-        .for_each(|(row2, (ys, (us, vs)))| {
-            let r0 = &rgba[row2 * 2 * width * 4..][..width * 4];
-            let r1 = &rgba[(row2 * 2 + 1) * width * 4..][..width * 4];
-            for x in 0..width {
-                ys[x] = luma(&r0[x * 4..]);
-                ys[width + x] = luma(&r1[x * 4..]);
-            }
-            for x in 0..cw {
-                let mut s = [0i32; 3];
-                for p in [&r0[x * 8..], &r0[x * 8 + 4..], &r1[x * 8..], &r1[x * 8 + 4..]] {
-                    for c in 0..3 {
-                        s[c] += p[c] as i32;
-                    }
-                }
-                // s holds sums of 4 samples, hence >> 10 instead of >> 8.
-                let chroma =
-                    |k: [i32; 3]| ((((k[0] * s[0] + k[1] * s[1] + k[2] * s[2] + 512) >> 10) + 128).clamp(0, 255)) as u8;
-                us[x] = chroma(ku);
-                vs[x] = chroma(kv);
-            }
-        });
+    let mut img = YuvPlanarImageMut {
+        y_plane: BufferStoreMut::Borrowed(y_plane),
+        y_stride: width as u32,
+        u_plane: BufferStoreMut::Borrowed(u_plane),
+        u_stride: cw as u32,
+        v_plane: BufferStoreMut::Borrowed(v_plane),
+        v_stride: cw as u32,
+        width: width as u32,
+        height: height as u32,
+    };
+    yuvutils_rs::rgba_to_yuv420(
+        &mut img,
+        rgba,
+        (width * 4) as u32,
+        YuvRange::Limited,
+        matrix.standard(),
+        YuvConversionMode::Balanced,
+    )
+    .expect("even frame size with matching buffers");
 }
 
 pub struct FfmpegWriter {

@@ -55,6 +55,45 @@ On this machine the CPU wins for typical 2D scenes: copying 8 MB per frame back 
 GPU costs more than rasterizing on 16 threads. The GPU wins on heavy scenes. That's why
 `auto` measures instead of assuming.
 
+## Community crates evaluated (2026-11-12)
+
+Each candidate was measured on its own pipeline stage, then end to end with an interleaved
+A/B (old and new binaries alternate run by run, so background load hits both; median of
+4–6 runs, 1080p60 unless noted).
+
+| Crate | Stage | Verdict | Isolated result |
+|---|---|---|---|
+| [yuvutils-rs](https://github.com/awxkee/yuvutils-rs) | RGBA → YUV 4:2:0 before ffmpeg | **Adopted** | 0.67 → 0.06 ms/frame wall, 5.0 → 0.3 ms single-thread (16× less CPU); max ±1 level vs the old loop |
+| [vello_cpu](https://github.com/linebender/vello) | CPU rasterizer | **Adopted, adaptive** | Benchmark (400 shapes): 257 → 663 fps (2.6×, beats the GPU's ~305). Light scenes: ~15% slower, so `cpu` picks per complexity bucket |
+| [mimalloc](https://github.com/purpleprotocol/mimalloc_rust) | Global allocator | Rejected | Within ±2% on every scene (noise) |
+| [blaze](https://github.com/indexable-inc/blaze) | Build tool (incremental rebuilds) | Not applicable | Speeds up `cargo build`, not renders; Linux/macOS only, no Windows installer |
+
+End to end, before → after:
+
+| Output | SquareToCircle | Showcase | Graphing | Benchmark |
+|---|---|---|---|---|
+| MP4, default (NVENC) | 1.33 → 1.23 s (−7%) | 3.35 → 2.98 s (−11%) | 2.92 → 2.57 s (−12%) | 1.46 → 1.23 s (−16%) |
+| MP4, `--encoder x264` | 1.97 → 1.89 s (−4%) | 5.42 → 5.14 s (−5%) | 4.61 → 4.44 s (−4%) | 2.77 → 2.59 s (−7%) |
+| MP4, 480p15 | 0.22 → 0.22 s (−2%) | 0.40 → 0.39 s (−4%) | 0.41 → 0.39 s (−6%) | 0.37 → 0.33 s (−9%) |
+| `--format none` (render only) | 0.70 → 0.69 s | 1.28 → 1.27 s | 1.14 → 1.16 s | 0.99 → 0.79 s (−21%) |
+
+The YUV conversion gain is largest with NVENC, where ffmpeg no longer competes with our
+conversion for CPU; with x264 the encoder itself is still the bottleneck. With vello the
+CPU now beats the GPU on the Benchmark scene too, so `auto` picks the CPU there.
+
+
+## Also evaluated, not adopted (2026-11-13)
+
+Measured for low- to mid-range laptops (4–8 cores simulated with process affinity) and
+kept out of the engine. ffmpeg stays the MP4 encoder and the audio muxer.
+
+| Candidate | Result | Why not |
+|---|---|---|
+| Windows Media Foundation (H.264 + AAC, in-process, no ffmpeg) | On 4 cores: 60 s narrated scene 4.3 s vs 12.0 s (ffmpeg NVENC); Showcase 3.3 s vs 4.3 s | Windows-only second code path, untested on Intel/AMD iGPUs, MF quirks (its faststart option writes corrupt files), files 1.5–3× larger |
+| openh264 + muxide | 10–50× slower than x264 (no nasm → no SIMD), Baseline profile only | Too slow |
+| vello (GPU compute) | Readback-bound: 474–520 fps on light scenes vs 641–670 for the wgpu renderer; ≤16% faster on the 400-shape scene | Not faster; needs wgpu 24 → 30 |
+| vello_hybrid | 139–154 fps on the 400-shape scene | Slower everywhere |
+
 ## Reproduce
 
 ```powershell

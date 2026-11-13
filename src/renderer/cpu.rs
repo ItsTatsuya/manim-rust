@@ -1,5 +1,10 @@
-//! CPU rasterizer built on tiny-skia (the Cairo equivalent). Frames are independent,
-//! so a batch is rasterized across all cores with rayon.
+//! CPU rasterizers. Frames are independent, so a batch is rasterized across all cores
+//! with rayon, one frame per worker.
+//!
+//! Two rasterizers are available: tiny-skia (the Cairo equivalent, lowest fixed cost per
+//! frame) and, with the `vello` feature, vello_cpu (scales far better with path count).
+//! [`Raster::Adaptive`] groups frames by path count, times both rasterizers on the first
+//! few live frames of each group, and from then on uses the faster one for that group.
 
 use std::sync::{Arc, Mutex};
 
@@ -11,14 +16,146 @@ use tiny_skia::{
 
 use super::{DisplayList, DrawPath, Layer, Renderer};
 
+/// Which rasterizer a [`CpuRenderer`] uses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Raster {
+    /// tiny-skia only. Deterministic; used by tests and `--renderer skia`.
+    Skia,
+    /// vello_cpu, falling back to tiny-skia for frames with images.
+    #[cfg(feature = "vello")]
+    Vello,
+    /// Measure both per complexity bucket and keep the faster.
+    #[cfg(feature = "vello")]
+    Adaptive,
+}
+
+impl Raster {
+    /// The best default for this build.
+    pub fn best() -> Self {
+        #[cfg(feature = "vello")]
+        return Raster::Adaptive;
+        #[cfg(not(feature = "vello"))]
+        Raster::Skia
+    }
+}
+
 pub struct CpuRenderer {
     threads: usize,
+    raster: Raster,
+    #[cfg(feature = "vello")]
+    calib: Calibration,
 }
 
 impl CpuRenderer {
+    /// The best rasterizer this build has (adaptive when vello is compiled in).
     pub fn new() -> Self {
-        CpuRenderer { threads: rayon::current_num_threads() }
+        Self::with_raster(Raster::best())
     }
+
+    pub fn with_raster(raster: Raster) -> Self {
+        CpuRenderer {
+            threads: rayon::current_num_threads(),
+            raster,
+            #[cfg(feature = "vello")]
+            calib: Calibration::default(),
+        }
+    }
+}
+
+/// Per-bucket timings for [`Raster::Adaptive`]. A frame's bucket is ⌊log2(curves + 1)⌋
+/// over its scene items, so each bucket covers a 2× range of path complexity.
+#[cfg(feature = "vello")]
+struct Calibration {
+    /// `[tiny-skia, vello]` fastest seconds seen and sample counts per bucket. The minimum
+    /// rather than the mean, so one-off costs (a worker's first vello context) don't count.
+    best: [[f64; 2]; 32],
+    samples: [[u32; 2]; 32],
+}
+
+#[cfg(feature = "vello")]
+impl Default for Calibration {
+    fn default() -> Self {
+        Calibration { best: [[f64::INFINITY; 2]; 32], samples: [[0; 2]; 32] }
+    }
+}
+
+#[cfg(feature = "vello")]
+#[derive(Clone, Copy)]
+enum Plan {
+    Use(usize),
+    /// Run this rasterizer and record its time under the bucket.
+    Time(usize, usize),
+}
+
+#[cfg(feature = "vello")]
+impl Calibration {
+    const SAMPLES: u32 = 3;
+
+    fn bucket(dl: &DisplayList) -> usize {
+        let curves: usize = dl.items.iter().flat_map(|i| &i.subpaths).map(|s| s.curves.len() + 1).sum();
+        ((usize::BITS - 1 - (curves + 1).leading_zeros()) as usize).min(31)
+    }
+
+    fn calibrated(&self, b: usize) -> bool {
+        self.samples[b].iter().all(|&n| n >= Self::SAMPLES)
+    }
+
+    /// Buckets at or above this go to vello before they are measured (measured crossover
+    /// on a 16-thread Zen 3: vello wins from roughly 1–2k curves per frame).
+    const VELLO_PRIOR: usize = 10;
+
+    /// Pick a rasterizer per frame. Until a bucket has `SAMPLES` timings of both, its
+    /// frames alternate between the two, counting frames already planned in this batch.
+    /// Beyond that within the same batch (timings arrive only after it), the prior decides.
+    fn plan(&self, frames: &[&DisplayList]) -> Vec<Plan> {
+        let mut pending = self.samples;
+        frames
+            .iter()
+            .map(|dl| {
+                if dl.has_images() {
+                    return Plan::Use(0);
+                }
+                let b = Self::bucket(dl);
+                if self.calibrated(b) {
+                    return Plan::Use(usize::from(self.best[b][1] < self.best[b][0]));
+                }
+                let n = &mut pending[b];
+                if n.iter().all(|&k| k >= Self::SAMPLES) {
+                    return Plan::Use(usize::from(b >= Self::VELLO_PRIOR));
+                }
+                let r = usize::from(n[1] < n[0]);
+                n[r] += 1;
+                Plan::Time(b, r)
+            })
+            .collect()
+    }
+
+    fn record(&mut self, b: usize, r: usize, secs: f64) {
+        let was = self.calibrated(b);
+        self.best[b][r] = self.best[b][r].min(secs);
+        self.samples[b][r] += 1;
+        if !was && self.calibrated(b) && std::env::var_os("MANIM_TRACE").is_some() {
+            let [s, v] = self.best[b];
+            eprintln!(
+                "trace: cpu raster bucket {b} (~{} curves): tiny-skia {:.2} ms, vello {:.2} ms → {}",
+                1usize << b,
+                s * 1e3,
+                v * 1e3,
+                if v < s { "vello" } else { "tiny-skia" }
+            );
+        }
+    }
+}
+
+/// 0 = tiny-skia, 1 = vello (falls back to tiny-skia for frames with images).
+#[cfg(feature = "vello")]
+fn rasterize_with(dl: &DisplayList, raster: usize) -> Vec<u8> {
+    if raster == 1 {
+        if let Some(px) = super::vello::rasterize(dl) {
+            return px;
+        }
+    }
+    rasterize(dl)
 }
 
 impl Default for CpuRenderer {
@@ -37,7 +174,7 @@ type LayerCache = Vec<(Arc<Vec<DrawPath>>, u32, u32, [u32; 4], Arc<Pixmap>)>;
 static LAYERS: Mutex<LayerCache> = Mutex::new(Vec::new());
 const MAX_CACHED_LAYERS: usize = 4;
 
-fn base_pixmap(dl: &DisplayList) -> Pixmap {
+pub(super) fn base_pixmap(dl: &DisplayList) -> Pixmap {
     let (w, h) = (dl.width.max(1), dl.height.max(1));
     let blank = || {
         let mut pm = Pixmap::new(w, h).expect("valid frame size");
@@ -116,11 +253,47 @@ pub fn rasterize(dl: &DisplayList) -> Vec<u8> {
 
 impl Renderer for CpuRenderer {
     fn name(&self) -> String {
-        format!("CPU (tiny-skia, {} threads)", self.threads)
+        let r = match self.raster {
+            Raster::Skia => "tiny-skia",
+            #[cfg(feature = "vello")]
+            Raster::Vello => "vello",
+            #[cfg(feature = "vello")]
+            Raster::Adaptive => "tiny-skia/vello adaptive",
+        };
+        format!("CPU ({r}, {} threads)", self.threads)
     }
 
     fn render_batch(&mut self, frames: &[&DisplayList]) -> Result<Vec<Vec<u8>>> {
-        Ok(frames.par_iter().map(|dl| rasterize(dl)).collect())
+        match self.raster {
+            Raster::Skia => Ok(frames.par_iter().map(|dl| rasterize(dl)).collect()),
+            #[cfg(feature = "vello")]
+            Raster::Vello => Ok(frames.par_iter().map(|dl| rasterize_with(dl, 1)).collect()),
+            #[cfg(feature = "vello")]
+            Raster::Adaptive => {
+                let plans = self.calib.plan(frames);
+                type Timed = Option<(usize, usize, f64)>;
+                let out: Vec<(Vec<u8>, Timed)> = frames
+                    .par_iter()
+                    .zip(&plans)
+                    .map(|(dl, plan)| match *plan {
+                        Plan::Use(r) => (rasterize_with(dl, r), None),
+                        Plan::Time(b, r) => {
+                            let t = std::time::Instant::now();
+                            let px = rasterize_with(dl, r);
+                            (px, Some((b, r, t.elapsed().as_secs_f64())))
+                        }
+                    })
+                    .collect();
+                let mut frames_out = Vec::with_capacity(out.len());
+                for (px, timing) in out {
+                    if let Some((b, r, secs)) = timing {
+                        self.calib.record(b, r, secs);
+                    }
+                    frames_out.push(px);
+                }
+                Ok(frames_out)
+            }
+        }
     }
 
     fn batch_size(&self) -> usize {
