@@ -36,7 +36,9 @@ rayon = "1.10"
 tiny-skia = "0.11"
 png = "0.17"
 gif = "0.13"
-wgpu = { version = "24", optional = true }
+# Backends match `Backends::PRIMARY` (DX12/Vulkan on Windows, Vulkan on Linux, Metal on macOS);
+# no GLES/WebGPU. wgpu 29 matches gpui-ce, so a host linking both ships one wgpu/naga.
+wgpu = { version = "29", optional = true, default-features = false, features = ["std", "parking_lot", "wgsl", "dx12", "vulkan", "metal"] }
 pollster = { version = "0.4", optional = true }
 bytemuck = { version = "1", features = ["derive"], optional = true }
 lyon = { version = "1", optional = true }

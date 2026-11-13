@@ -52,14 +52,17 @@ struct Vertex {
 }
 
 fn instance() -> wgpu::Instance {
-    wgpu::Instance::new(&wgpu::InstanceDescriptor { backends: wgpu::Backends::PRIMARY, ..Default::default() })
+    wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::PRIMARY,
+        ..wgpu::InstanceDescriptor::new_without_display_handle()
+    })
 }
 
 /// Human-readable list of adapters, plus which one `Auto` would choose.
 pub fn adapter_report() -> String {
     let inst = instance();
     let mut out = String::new();
-    let adapters = inst.enumerate_adapters(wgpu::Backends::PRIMARY);
+    let adapters = pollster::block_on(inst.enumerate_adapters(wgpu::Backends::PRIMARY));
     if adapters.is_empty() {
         out.push_str("No GPU adapters found.\n");
     }
@@ -101,7 +104,7 @@ impl GpuRenderer {
             compatible_surface: None,
             force_fallback_adapter: false,
         }))
-        .ok_or_else(|| anyhow!("no GPU adapter found"))?;
+        .map_err(|e| anyhow!("no GPU adapter found: {e}"))?;
         let info = adapter.get_info();
         if require_hardware && info.device_type == wgpu::DeviceType::Cpu {
             bail!("only a software adapter is available ({})", info.name);
@@ -112,15 +115,13 @@ impl GpuRenderer {
         }
         let samples = if adapter.get_texture_format_features(FORMAT).flags.sample_count_supported(4) { 4 } else { 1 };
 
-        let (device, queue) = pollster::block_on(adapter.request_device(
-            &wgpu::DeviceDescriptor {
-                label: Some("manim"),
-                required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::downlevel_defaults().using_resolution(limits),
-                memory_hints: wgpu::MemoryHints::Performance,
-            },
-            None,
-        ))
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("manim"),
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::downlevel_defaults().using_resolution(limits),
+            memory_hints: wgpu::MemoryHints::Performance,
+            ..Default::default()
+        }))
         .context("could not open GPU device")?;
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -130,7 +131,7 @@ impl GpuRenderer {
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: None,
             bind_group_layouts: &[],
-            push_constant_ranges: &[],
+            immediate_size: 0,
         });
         // Blend color in sRGB space like Cairo/tiny-skia; keep destination alpha at 1.
         let blend = wgpu::BlendState {
@@ -171,7 +172,7 @@ impl GpuRenderer {
             primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
             depth_stencil: None,
             multisample: wgpu::MultisampleState { count: samples, mask: !0, alpha_to_coverage_enabled: false },
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         });
 
@@ -315,7 +316,9 @@ struct InFlight {
 
 impl GpuRenderer {
     fn collect(&mut self, f: InFlight) -> Result<Vec<Vec<u8>>> {
-        let _ = self.device.poll(wgpu::Maintain::WaitForSubmissionIndex(f.submission));
+        self.device
+            .poll(wgpu::PollType::Wait { submission_index: Some(f.submission), timeout: None })
+            .context("waiting for the GPU")?;
         for _ in 0..f.count {
             f.rx.recv().context("GPU readback channel closed")?.context("GPU readback failed")?;
         }
@@ -373,6 +376,7 @@ impl GpuRenderer {
                     label: None,
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                         view,
+                        depth_slice: None,
                         resolve_target,
                         ops: wgpu::Operations {
                             load: wgpu::LoadOp::Clear(wgpu::Color {
@@ -387,6 +391,7 @@ impl GpuRenderer {
                     depth_stencil_attachment: None,
                     timestamp_writes: None,
                     occlusion_query_set: None,
+                    multiview_mask: None,
                 });
                 if let Some((vb, ib)) = &buffers {
                     pass.set_pipeline(&self.pipeline);
