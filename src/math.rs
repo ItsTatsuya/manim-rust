@@ -149,4 +149,11 @@ mod tests {
         assert!(m.height() > 0.2 && m.height() < 2.0, "height {}", m.height());
         assert!(MathTex::new("undefinedthing(x)").is_err());
     }
+
+    #[test]
+    fn probe_digit_height() {
+        let svg = typst_to_svg("$ 2 $", Color::WHITE).unwrap();
+        eprintln!("SVG HEAD: {}", &svg[..svg.len().min(200)]);
+        eprintln!("HEIGHT48: {}", MathTex::styled("2", 48.0, Color::WHITE).unwrap().height());
+    }
 }

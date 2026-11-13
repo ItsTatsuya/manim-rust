@@ -220,16 +220,30 @@ fn remove_executables(target: &Path, id: &str) {
     for name in [format!("{bin}{}", env::consts::EXE_SUFFIX), format!("{crate_name}.pdb"), format!("{bin}.d")] {
         let _ = fs::remove_file(release.join(name));
     }
-    // cargo also keeps a copy in deps/ (`scene_<id>.exe` on Windows, `scene_<id>-<hash>` elsewhere).
-    if let Ok(entries) = fs::read_dir(release.join("deps")) {
-        for e in entries.flatten() {
-            let path = e.path();
-            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
-            let ours = stem == crate_name || stem.starts_with(&format!("{crate_name}-"));
-            let is_exe = matches!(path.extension().and_then(|x| x.to_str()), None | Some("exe" | "pdb"));
-            if ours && is_exe {
-                let _ = fs::remove_file(&path);
+    // cargo also keeps an intermediate copy, and where depends on its version: deps/
+    // (`scene_<id>.exe` on Windows, `scene_<id>-<hash>` elsewhere) up to cargo 1.99, and
+    // build/scene-<id>/<hash>/out/ from 1.100 on. Sweep both; the id is unique per script,
+    // so the engine's cached library artifacts are never touched.
+    let is_ours = |path: &Path| {
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+        let ours = [&crate_name, &bin].iter().any(|n| stem == n.as_str() || stem.starts_with(&format!("{n}-")));
+        ours && matches!(path.extension().and_then(|x| x.to_str()), None | Some("exe" | "pdb"))
+    };
+    remove_files(&release.join("deps"), false, &is_ours);
+    remove_files(&release.join("build").join(&bin), true, &is_ours);
+}
+
+/// Delete the files in `dir` (and, with `recursive`, its subfolders) that `pick` selects.
+fn remove_files(dir: &Path, recursive: bool, pick: &dyn Fn(&Path) -> bool) {
+    let Ok(entries) = fs::read_dir(dir) else { return };
+    for e in entries.flatten() {
+        let path = e.path();
+        if path.is_dir() {
+            if recursive {
+                remove_files(&path, true, pick);
             }
+        } else if pick(&path) {
+            let _ = fs::remove_file(&path);
         }
     }
 }
