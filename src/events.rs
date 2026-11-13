@@ -5,6 +5,8 @@
 //! | event | fields |
 //! |---|---|
 //! | `start` | `scene`, `width`, `height`, `fps`, `renderer`, `output` |
+//! | `renderer` | `renderer`, `kind` (`cpu`/`gpu`), `cpu_ms_per_frame`, `gpu_ms_per_frame` (auto calibration settled) |
+//! | `warning` | `message` |
 //! | `play` | `index`, `name`, `start`, `run_time`, `frames` |
 //! | `wait` | `start`, `run_time`, `frames` |
 //! | `progress` | `index`, `percent`, `time` (inside a play) |
@@ -12,7 +14,7 @@
 //! | `sound` | `source`, `start`, `gain` |
 //! | `problem` | `kind`, `time`, `play`, `a`, `b`, `message` (from `--check`) |
 //! | `snapshot` | `path`, `time`, `label` |
-//! | `done` | `scene`, `duration`, `frames`, `rasterized`, `elapsed`, `outputs` |
+//! | `done` | `scene`, `duration`, `frames`, `rasterized`, `elapsed`, `outputs`, `problems`, `renderer` (final backend) |
 //! | `error` | `scene`, `message` |
 //!
 //! `human` (the default) prints readable lines instead and `none` stays quiet.

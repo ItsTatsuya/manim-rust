@@ -1511,13 +1511,26 @@ pub(crate) fn install(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
         Ok(())
     }));
 
-    reg!(ctx, n, "setTheme", |json: String| {
-        let theme = Theme::from_json(&json)?;
-        with_state(|st| {
-            scene(st)?.set_theme(theme);
-            Ok(())
-        })
-    });
+    // A theme as JSON text, or the path of a theme file in the project (`.json` optional).
+    reg!(ctx, n, "setTheme", |arg: String| with_state(|st| {
+        let theme = if arg.trim_start().starts_with('{') {
+            Theme::from_json(&arg)?
+        } else {
+            let mut path = asset_path(st, &arg)?;
+            if !path.exists() && path.extension().is_none() {
+                path.set_extension("json");
+            }
+            if !path.exists() {
+                bail!(
+                    "setTheme(\"{arg}\"): no theme file {} (pass theme JSON, a theme object, or a theme file path;                      there are no built-in named themes)",
+                    path.display()
+                );
+            }
+            Theme::load(&path)?
+        };
+        scene(st)?.set_theme(theme);
+        Ok(())
+    }));
 
     reg!(ctx, n, "theme", || with_state(|st| { Ok(scene(st)?.theme().map(|t| t.to_json()).unwrap_or_default()) }));
 

@@ -2,7 +2,7 @@
 //! muxed into the MP4 when the scene finishes.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
@@ -92,7 +92,7 @@ pub fn mux(ffmpeg: &Path, video: &Path, sounds: &[Sound]) -> Result<()> {
     let tmp_dir = video.with_extension("audio-tmp");
     std::fs::create_dir_all(&tmp_dir)?;
     let result = (|| -> Result<()> {
-        let mut cmd = Command::new(ffmpeg);
+        let mut cmd = crate::output::tool_command(ffmpeg);
         cmd.args(["-y", "-loglevel", "error", "-i"]).arg(video);
         let mut filters = Vec::new();
         for (i, s) in sounds.iter().enumerate() {

@@ -548,7 +548,11 @@ declare module "manim" {
     section(name: string): number;
     /** Play an audio file from the project folder, now or `timeOffset` seconds from now. */
     addSound(path: string, options?: number | { timeOffset?: number; at?: number; gain?: number }): this;
-    /** Apply a theme: background, pattern, default colors and fonts, text roles. */
+    /**
+     * Apply a theme: background, pattern, default colors and fonts, text roles.
+     * Takes a theme object, theme JSON text, or the path of a theme file in the project
+     * (`"themes/studio"` finds `themes/studio.json`). There are no built-in named themes.
+     */
     setTheme(theme: Theme | string): this;
     readonly theme: Theme | null;
     readonly camera: { backgroundColor: Color; readonly frameWidth: number; readonly frameHeight: number };

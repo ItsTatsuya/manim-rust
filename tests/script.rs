@@ -329,3 +329,34 @@ export default class T extends Scene {
     let host = ScriptHost::load(&p, HostOptions::default()).unwrap();
     host.run("T", &cfg()).unwrap();
 }
+
+#[test]
+fn axes_plot_returns_a_mobject_and_themes_load_by_path() {
+    let d = dir("plot");
+    std::fs::create_dir_all(d.join("themes")).unwrap();
+    write(&d, "themes/night.json", r##"{ "name": "Night", "colors": { "background": "#101820" } }"##);
+    let p = write(
+        &d,
+        "plot.ts",
+        r##"
+import { Scene, Axes, Create, Mobject } from "manim";
+const check = (ok: boolean, what: string) => { if (!ok) throw new Error(what); };
+export default class P extends Scene {
+  construct() {
+    this.setTheme("themes/night");
+    check(this.theme?.name === "Night", "theme from a file path");
+    const ax = Axes({ xRange: [-3, 3, 1], yRange: [-1, 9, 1] });
+    const g = ax.plot((x) => x * x);
+    const c = ax.plotParametricCurve((t) => [Math.cos(t), Math.sin(t)], { tRange: [0, 6.28] });
+    check(g instanceof Mobject && c instanceof Mobject, "plot returns a Mobject");
+    this.play(Create(ax), Create(g), Create(c));
+    let threw = false;
+    try { this.setTheme("no-such-theme"); } catch (e) { threw = String(e).includes("no built-in named themes"); }
+    check(threw, "unknown theme name explains itself");
+  }
+}
+"##,
+    );
+    let host = ScriptHost::load(&p, HostOptions::default()).unwrap();
+    host.run("P", &cfg()).unwrap();
+}

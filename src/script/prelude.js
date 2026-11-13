@@ -375,7 +375,7 @@ Object.assign(Axes.prototype, {
     const n = p.samples ?? 200;
     const pts = [];
     for (let k = 0; k <= n; k++) { const x = x0 + ((x1 - x0) * k) / n; const y = fn(x); pts.push(Number.isFinite(y) ? this.c2p(x, y) : [NaN, NaN, 0]); }
-    return curve(pts, p);
+    return wrap(curve(pts, p), Mobject.prototype);
   },
   plotParametricCurve(fn, o) {
     const p = opts(o);
@@ -383,7 +383,7 @@ Object.assign(Axes.prototype, {
     const n = p.samples ?? 200;
     const pts = [];
     for (let k = 0; k <= n; k++) { const t = t0 + ((t1 - t0) * k) / n; const [x, y] = fn(t); pts.push(this.c2p(x, y)); }
-    return curve(pts, p);
+    return wrap(curve(pts, p), Mobject.prototype);
   },
   getVerticalLine(point, o) { const [x] = this.p2c(point); return DashedLine(this.c2p(x, 0), point, o); },
   getHorizontalLine(point, o) { const [, y] = this.p2c(point); return DashedLine(this.c2p(0, y), point, o); },
@@ -690,7 +690,7 @@ export class Scene {
   section(name) { return this.nextSection(name); }
   /** Play an audio file from the project folder, starting now (or at `timeOffset` seconds from now). */
   addSound(path, o) { const p = opts(typeof o === "number" ? { timeOffset: o } : o); N.addSound(String(path), p.at ?? (p.timeOffset != null ? N.time() + p.timeOffset : -1), p.gain ?? 1); return this; }
-  /** Apply a theme (Manim Studio style JSON or object). */
+  /** Apply a theme: an object, JSON text, or a theme file path in the project. */
   setTheme(theme) { N.setTheme(typeof theme === "string" ? theme : JSON.stringify(theme)); return this; }
   get theme() { const t = N.theme(); return t ? JSON.parse(t) : null; }
   get camera() { return { set backgroundColor(c) { N.setBackgroundColor(c); }, get frameWidth() { return JSON.parse(N.frameSize())[0]; }, get frameHeight() { return JSON.parse(N.frameSize())[1]; } }; }

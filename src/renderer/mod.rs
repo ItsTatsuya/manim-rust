@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
+use crate::events::Events;
 use crate::mobject::ImageRef;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -125,7 +126,10 @@ impl std::str::FromStr for RendererKind {
 /// and the faster one is kept: on many-core CPUs tiny-skia often beats GPU readback for
 /// light 2D scenes, while heavy or high-resolution scenes favour the GPU.
 /// An explicit `Gpu` request fails loudly if no usable adapter exists.
-pub fn create(kind: RendererKind, width: u32, height: u32) -> Result<Box<dyn Renderer>> {
+///
+/// `events` receives a `warning` when the GPU probe fails and a `renderer` event when
+/// auto calibration settles on a backend.
+pub fn create(kind: RendererKind, width: u32, height: u32, events: Events) -> Result<Box<dyn Renderer>> {
     match kind {
         RendererKind::Cpu => Ok(Box::new(cpu::CpuRenderer::new())),
         RendererKind::Skia => Ok(Box::new(cpu::CpuRenderer::with_raster(cpu::Raster::Skia))),
@@ -148,10 +152,15 @@ pub fn create(kind: RendererKind, width: u32, height: u32) -> Result<Box<dyn Ren
         RendererKind::Auto => {
             #[cfg(feature = "gpu")]
             match gpu::GpuRenderer::new(width, height, true) {
-                Ok(g) => return Ok(Box::new(AutoRenderer::new(g))),
-                Err(e) => eprintln!("manim: GPU unavailable ({e:#}); using CPU renderer"),
+                Ok(g) => return Ok(Box::new(AutoRenderer::new(g, events))),
+                Err(e) => {
+                    let message = format!("GPU unavailable ({e:#}); using CPU renderer");
+                    events.emit("warning", serde_json::json!({ "message": message }), || {
+                        Some(format!("manim: {message}"))
+                    });
+                }
             }
-            let _ = (width, height);
+            let _ = (width, height, events);
             Ok(Box::new(cpu::CpuRenderer::new()))
         }
     }
@@ -166,6 +175,7 @@ pub struct AutoRenderer {
     best: [f64; 2],
     trials: [u32; 2],
     choice: Option<usize>,
+    events: Events,
 }
 
 #[cfg(feature = "gpu")]
@@ -174,8 +184,15 @@ impl AutoRenderer {
     const MIN_FRAMES: usize = 8;
     const TRIALS: u32 = 2;
 
-    pub fn new(gpu: gpu::GpuRenderer) -> Self {
-        AutoRenderer { cpu: cpu::CpuRenderer::new(), gpu, best: [f64::INFINITY; 2], trials: [0; 2], choice: None }
+    pub fn new(gpu: gpu::GpuRenderer, events: Events) -> Self {
+        AutoRenderer {
+            cpu: cpu::CpuRenderer::new(),
+            gpu,
+            best: [f64::INFINITY; 2],
+            trials: [0; 2],
+            choice: None,
+            events,
+        }
     }
 
     fn run(&mut self, which: usize, frames: &[&DisplayList]) -> Result<Vec<Vec<u8>>> {
@@ -218,11 +235,18 @@ impl Renderer for AutoRenderer {
         if self.trials.iter().all(|&n| n >= Self::TRIALS) {
             let c = if self.best[1] < self.best[0] { 1 } else { 0 };
             self.choice = Some(c);
-            eprintln!(
-                "manim: auto renderer measured CPU {:.2} ms/frame, GPU {:.2} ms/frame → using {}",
-                self.best[0] * 1e3,
-                self.best[1] * 1e3,
-                if c == 1 { "GPU" } else { "CPU" }
+            let (cpu_ms, gpu_ms) = (self.best[0] * 1e3, self.best[1] * 1e3);
+            let kind = if c == 1 { "gpu" } else { "cpu" };
+            let name = if c == 1 { self.gpu.name() } else { self.cpu.name() };
+            self.events.emit(
+                "renderer",
+                serde_json::json!({ "renderer": name, "kind": kind, "cpu_ms_per_frame": cpu_ms, "gpu_ms_per_frame": gpu_ms }),
+                || {
+                    Some(format!(
+                        "manim: auto renderer measured CPU {cpu_ms:.2} ms/frame, GPU {gpu_ms:.2} ms/frame → using {}",
+                        kind.to_ascii_uppercase()
+                    ))
+                },
             );
         }
         Ok(out)

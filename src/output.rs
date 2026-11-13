@@ -33,8 +33,23 @@ impl std::str::FromStr for OutputFormat {
     }
 }
 
+/// A `Command` for a helper tool (ffmpeg, ffprobe). On Windows it gets no console
+/// window, so a GUI host without a console doesn't flash one per run; its pipes and
+/// exit status work as usual.
+pub(crate) fn tool_command(exe: impl AsRef<std::ffi::OsStr>) -> Command {
+    #[allow(unused_mut)]
+    let mut cmd = Command::new(exe);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
 fn runs(exe: &Path) -> bool {
-    Command::new(exe).arg("-version").stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success())
+    tool_command(exe).arg("-version").stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success())
 }
 
 /// Find an ffmpeg executable: `MANIM_FFMPEG`, then PATH, then (on Windows) winget's
@@ -128,7 +143,7 @@ impl Encoder {
     /// Does this ffmpeg + driver actually encode with it? (Builds often list hardware
     /// encoders that fail at runtime without the matching GPU.)
     fn works(self, ffmpeg: &Path) -> bool {
-        Command::new(ffmpeg)
+        tool_command(ffmpeg)
             .args([
                 "-v",
                 "error",
@@ -179,6 +194,15 @@ pub trait FrameWriter: Send {
 }
 
 /// Resolve `Auto` and open a writer at `base` (extension added here).
+/// `base` + `.ext`. Unlike `Path::with_extension`, keeps dots already in the name
+/// (`x.partial` → `x.partial.mp4`, not `x.mp4`).
+pub fn append_ext(base: &Path, ext: &str) -> PathBuf {
+    let mut s = base.as_os_str().to_owned();
+    s.push(".");
+    s.push(ext);
+    PathBuf::from(s)
+}
+
 pub fn create_writer(
     format: OutputFormat,
     encoder: Encoder,
@@ -201,8 +225,8 @@ pub fn create_writer(
         fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
     Ok(match format {
-        OutputFormat::Mp4 => Box::new(FfmpegWriter::new(&base.with_extension("mp4"), encoder, width, height, fps)?),
-        OutputFormat::Gif => Box::new(GifWriter::new(&base.with_extension("gif"), width, height, fps)?),
+        OutputFormat::Mp4 => Box::new(FfmpegWriter::new(&append_ext(base, "mp4"), encoder, width, height, fps)?),
+        OutputFormat::Gif => Box::new(GifWriter::new(&append_ext(base, "gif"), width, height, fps)?),
         OutputFormat::Png => Box::new(PngSequence::new(base, width, height)?),
         OutputFormat::None => Box::new(NullWriter(PathBuf::new())),
         OutputFormat::Auto => unreachable!(),
@@ -324,7 +348,7 @@ impl FfmpegWriter {
         let even = width.is_multiple_of(2) && height.is_multiple_of(2);
         // ffmpeg's own RGBA→YUV conversion (odd sizes) uses BT.601.
         let matrix = if even { YuvMatrix::for_height(height) } else { YuvMatrix::Bt601 };
-        let mut cmd = Command::new(&exe);
+        let mut cmd = tool_command(&exe);
         cmd.args(["-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", if even { "yuv420p" } else { "rgba" }])
             .args(["-s", &format!("{width}x{height}"), "-r", &format!("{fps}"), "-i", "-"]);
         if !even {

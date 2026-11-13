@@ -217,7 +217,7 @@ impl Scene {
                         config.fps,
                     )?))
                 });
-                let renderer = renderer::create(config.renderer, config.pixel_width, config.pixel_height);
+                let renderer = renderer::create(config.renderer, config.pixel_width, config.pixel_height, events);
                 (renderer, writer.join().expect("writer setup panicked"))
             });
             Some(Pipeline::new(renderer?, writer?))
@@ -954,7 +954,7 @@ impl Scene {
         self.events.emit(
             "done",
             json!({ "scene": self.name, "duration": duration, "frames": written, "rasterized": rasterized,
-                    "elapsed": secs, "outputs": outs, "problems": problems }),
+                    "elapsed": secs, "outputs": outs, "problems": problems, "renderer": renderer_name }),
             || {
                 let mut s = format!(
                     "manim: {written} frames ({rasterized} rasterized) in {secs:.2}s = {:.1} fps [{renderer_name}], scene {duration:.2}s",

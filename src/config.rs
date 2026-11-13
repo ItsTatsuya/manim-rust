@@ -268,7 +268,7 @@ impl Config {
     pub fn video_base(&self, scene: &str) -> PathBuf {
         match &self.output {
             Some(o) if is_dir_like(o) => o.join(scene),
-            Some(o) => o.with_extension(""),
+            Some(o) => strip_media_ext(o),
             None => self.media_dir.join("videos").join(scene).join(self.quality_dir()).join(scene),
         }
     }
@@ -276,7 +276,7 @@ impl Config {
     /// Where the last-frame PNG for `scene` goes.
     pub fn image_path(&self, scene: &str) -> PathBuf {
         match &self.output {
-            Some(_) => self.video_base(scene).with_extension("png"),
+            Some(_) => crate::output::append_ext(&self.video_base(scene), "png"),
             None => self.media_dir.join("images").join(scene).join(format!("{scene}.png")),
         }
     }
@@ -290,6 +290,16 @@ fn is_dir_like(p: &std::path::Path) -> bool {
     p.is_dir() || p.extension().is_none()
 }
 
+/// `-o x.partial.mp4` → `x.partial`: drops only a media extension the writers add back,
+/// so dotted names (`x.partial`, `take.v2`) survive.
+fn strip_media_ext(p: &std::path::Path) -> PathBuf {
+    const MEDIA: [&str; 5] = ["mp4", "gif", "png", "mov", "webm"];
+    match p.extension().and_then(|e| e.to_str()) {
+        Some(e) if MEDIA.iter().any(|m| m.eq_ignore_ascii_case(e)) => p.with_extension(""),
+        _ => p.to_path_buf(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -301,5 +311,16 @@ mod tests {
         assert_eq!(c.renderer, RendererKind::Cpu);
         assert!(c.save_last_frame && !c.write_video);
         assert!(Config::parse(["--bogus".to_string()]).is_err());
+    }
+
+    #[test]
+    fn output_keeps_dotted_names() {
+        let out = |o: &str| Config::parse(["-o", o].map(String::from)).unwrap();
+        let c = out("render/x.partial.mp4");
+        let video = crate::output::append_ext(&c.video_base("S"), "mp4");
+        assert_eq!(video, PathBuf::from("render/x.partial.mp4"));
+        assert_eq!(c.image_path("S"), PathBuf::from("render/x.partial.png"));
+        let c = out("render/take.v2");
+        assert_eq!(crate::output::append_ext(&c.video_base("S"), "gif"), PathBuf::from("render/take.v2.gif"));
     }
 }
