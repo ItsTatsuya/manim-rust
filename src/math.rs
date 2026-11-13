@@ -27,6 +27,9 @@ use crate::mobject::VMobject;
 const BASE_PT: f64 = 11.0;
 /// Scene units per em at font size 1 (same as `Text`).
 const UNITS_PER_FONT_SIZE: f64 = 0.015;
+/// `typst_svg` sizes the root in `pt`, which usvg converts to CSS px (96/72);
+/// dividing it back out makes one parsed unit one Typst point again.
+const PX_PER_PT: f64 = 96.0 / 72.0;
 
 struct Shared {
     library: LazyHash<Library>,
@@ -107,7 +110,7 @@ pub fn typst_to_svg(markup: &str, color: Color) -> Result<String> {
 pub fn typeset(markup: &str, font_size: f64, color: Color) -> Result<VMobject> {
     let svg = typst_to_svg(markup, color)?;
     // One Typst point → scene units, so BASE_PT points = one em at `font_size`.
-    let scale = font_size * UNITS_PER_FONT_SIZE / BASE_PT;
+    let scale = font_size * UNITS_PER_FONT_SIZE / (BASE_PT * PX_PER_PT);
     let mut m = crate::svg::parse(svg.as_bytes(), scale)?.center();
     m.for_each_mut(&mut |c| c.meta.nonzero = true);
     Ok(m)
@@ -151,9 +154,12 @@ mod tests {
     }
 
     #[test]
-    fn probe_digit_height() {
-        let svg = typst_to_svg("$ 2 $", Color::WHITE).unwrap();
-        eprintln!("SVG HEAD: {}", &svg[..svg.len().min(200)]);
-        eprintln!("HEIGHT48: {}", MathTex::styled("2", 48.0, Color::WHITE).unwrap().height());
+    fn digit_height_matches_font_size() {
+        // A New Computer Modern digit is ~0.665 em, and an em is 0.015 units per font size:
+        // at 48 that is ~0.48 units (it was 0.639 when usvg's pt→px factor leaked through).
+        let h = MathTex::styled("2", 48.0, crate::color::WHITE).unwrap().height();
+        assert!((h - 0.4795).abs() < 0.005, "digit height {h}");
+        let h96 = MathTex::styled("2", 96.0, crate::color::WHITE).unwrap().height();
+        assert!((h96 - 2.0 * h).abs() < 1e-6, "height must scale linearly: {h} vs {h96}");
     }
 }
