@@ -360,3 +360,58 @@ export default class P extends Scene {
     let host = ScriptHost::load(&p, HostOptions::default()).unwrap();
     host.run("P", &cfg()).unwrap();
 }
+
+/// Seeking into a segment that predates a tracker, updater or redrawn mobject must
+/// replay only the updaters active then (regression: "tracker 0 does not exist" and a
+/// `World::get` index panic when seeking before them).
+#[test]
+fn seeking_before_later_updaters() {
+    let d = dir("seek-late");
+    let p = write(
+        &d,
+        "late.ts",
+        r##"
+import { Scene, Axes, ValueTracker, DecimalNumber, Create, alwaysRedraw } from "manim";
+export class TrackerLater extends Scene {
+  construct() {
+    const axes = Axes({ xRange: [0, 4, 1], yRange: [0, 50, 10] });
+    this.play(Create(axes), { runTime: 1.5 });
+    const r = new ValueTracker(1);
+    const n = alwaysRedraw(() => DecimalNumber(r.getValue()));
+    this.add(n);
+    this.play(r.animate.setValue(3), { runTime: 2 });
+    this.wait(2);
+  }
+}
+export class MobjectLater extends Scene {
+  construct() {
+    const r = new ValueTracker(1);
+    const axes = Axes({ xRange: [0, 4, 1], yRange: [0, 50, 10] });
+    this.play(Create(axes), { runTime: 1.5 });
+    const n = alwaysRedraw(() => DecimalNumber(r.getValue()));
+    this.add(n);
+    this.play(r.animate.setValue(3), { runTime: 2 });
+    this.wait(2);
+  }
+}
+"##,
+    );
+    let host = ScriptHost::load(&p, HostOptions::default()).unwrap();
+    let mut c = cfg();
+    c.record = true;
+    for name in ["TrackerLater", "MobjectLater"] {
+        host.run(name, &c).unwrap();
+        let shown = |host: &ScriptHost| host.with_scene(|s| s.inspect().len()).unwrap();
+        let late = host.frame_at(4.0).unwrap();
+        let after = shown(&host);
+        let early = host.frame_at(0.5).unwrap_or_else(|e| panic!("{name}: seek to 0.5 failed: {e:#}"));
+        assert!(shown(&host) < after, "{name}: the number isn't on screen yet at 0.5 s");
+        let mid = host.frame_at(2.5).unwrap();
+        assert_eq!(shown(&host), after, "{name}: the number is back at 2.5 s");
+        // Every time gives the same frame whatever was seeked before it.
+        assert!(host.frame_at(0.5).unwrap() == early, "{name}: 0.5 s reproducible");
+        assert!(host.frame_at(4.0).unwrap() == late, "{name}: 4.0 s reproducible");
+        assert!(host.frame_at(2.5).unwrap() == mid, "{name}: 2.5 s reproducible");
+        assert!(early != mid && mid != late);
+    }
+}

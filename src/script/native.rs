@@ -165,6 +165,10 @@ fn new_handle(st: &mut State, slot: Slot) -> u32 {
 fn slot(st: &State, h: u32) -> Result<Slot> {
     match st.slots.get(h as usize) {
         Some(Slot::Free) | None => bail!("mobject handle {h} is not valid"),
+        // After a seek the world is an earlier keyframe: mobjects created later are gone.
+        Some(Slot::Attached(id)) if st.scene.as_ref().is_some_and(|s| !s.world().contains(*id)) => {
+            bail!("mobject handle {h} refers to a mobject that does not exist at this point of the scene")
+        }
         Some(s) => Ok(s.clone()),
     }
 }
@@ -203,7 +207,7 @@ fn with_mob<R>(st: &mut State, h: u32, f: impl FnOnce(&mut VMobject) -> R) -> Re
             Slot::Detached(m) => m,
             _ => unreachable!(),
         },
-        Base::World(id) => scene(st)?.world_mut().get_mut(id),
+        Base::World(id) => scene(st)?.world_mut().try_get_mut(id)?,
     };
     Ok(f(walk(root, &path)?))
 }
@@ -1586,6 +1590,11 @@ pub(crate) fn install(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
         st.next_playback += 1;
         st.playbacks.insert(id, (pb, Vec::new()));
         Ok(id)
+    }));
+
+    // The recorded segment a playback belongs to (its play/wait index).
+    reg!(ctx, n, "playbackSegment", |pid: u32| with_state(|st| {
+        Ok(st.playbacks.get(&pid).context("unknown playback")?.0.segment() as u32)
     }));
 
     // Returns dt, or -1 once finished.

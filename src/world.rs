@@ -40,12 +40,26 @@ impl World {
         MobjectId(self.mobjects.len() - 1)
     }
 
+    /// The mobject `id`. Panics if it doesn't exist (see [`World::try_get`]).
     pub fn get(&self, id: MobjectId) -> &VMobject {
-        &self.mobjects[id.0]
+        self.try_get(id).unwrap_or_else(|e| panic!("{e}"))
     }
 
+    /// Panics if `id` doesn't exist (see [`World::try_get_mut`]).
     pub fn get_mut(&mut self, id: MobjectId) -> &mut VMobject {
-        Arc::make_mut(&mut self.mobjects[id.0])
+        self.try_get_mut(id).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// The mobject `id`, or an error if this world has no such mobject (e.g. an id
+    /// created later in the scene, used on a world restored from an earlier keyframe).
+    pub fn try_get(&self, id: MobjectId) -> anyhow::Result<&VMobject> {
+        let n = self.mobjects.len();
+        self.mobjects.get(id.0).map(|m| &**m).ok_or_else(|| missing(id, n))
+    }
+
+    pub fn try_get_mut(&mut self, id: MobjectId) -> anyhow::Result<&mut VMobject> {
+        let n = self.mobjects.len();
+        self.mobjects.get_mut(id.0).map(Arc::make_mut).ok_or_else(|| missing(id, n))
     }
 
     pub fn set(&mut self, id: MobjectId, m: VMobject) {
@@ -171,6 +185,10 @@ impl World {
     pub fn set_value(&mut self, t: TrackerId, v: f64) {
         self.trackers[t.0] = v;
     }
+}
+
+fn missing(id: MobjectId, n: usize) -> anyhow::Error {
+    anyhow::anyhow!("mobject {} does not exist at this point of the scene (the world has {n})", id.0)
 }
 
 impl Index<MobjectId> for World {

@@ -446,3 +446,20 @@ fn table_matrix_and_code_animate() {
         s.play(Transform::new(m, Matrix::integers([[5, 6], [7, 8]]).build()));
     });
 }
+
+#[test]
+fn world_lookups_of_missing_ids_are_errors() {
+    let mut w = manim::world::World::new();
+    let id = w.insert(Circle::new(1.0));
+    let later = w.insert(Circle::new(2.0));
+    let earlier = {
+        let mut e = manim::world::World::new();
+        e.insert(Circle::new(1.0));
+        e
+    };
+    assert!(w.try_get(later).is_ok() && earlier.try_get(id).is_ok());
+    let err = earlier.try_get(later).unwrap_err().to_string();
+    assert!(err.contains("does not exist"), "{err}");
+    let mut earlier = earlier;
+    assert!(earlier.try_get_mut(later).is_err());
+}

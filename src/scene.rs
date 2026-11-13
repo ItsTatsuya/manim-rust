@@ -116,6 +116,10 @@ impl Playback {
     pub fn is_finished(&self) -> bool {
         self.finished
     }
+    /// Index of the play/wait (and recorded segment) this playback belongs to.
+    pub fn segment(&self) -> usize {
+        self.play_index
+    }
     /// Whether this is a seek replay (no frames are written).
     pub fn is_replay(&self) -> bool {
         self.replay

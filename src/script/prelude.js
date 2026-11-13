@@ -653,7 +653,12 @@ function currentScene() {
 }
 
 export class Scene {
-  constructor() { this._updaters = []; }
+  constructor() {
+    this._updaters = [];
+    // The updaters active at the start of each play/wait, by segment index, so a seek
+    // replays a segment with exactly the updaters it had (not ones added later).
+    this._segments = [];
+  }
   /** Override this: build and animate the scene. */
   construct() {}
   add(...mobs) { N.add(JSON.stringify(mobs.flat().map((m) => m._h))); return this; }
@@ -679,10 +684,10 @@ export class Scene {
     const last = items[items.length - 1];
     if (last && typeof last === "object" && !(last instanceof Animation) && !(last instanceof AnimateBuilder) && !Array.isArray(last)) o = opts(items.pop());
     const specs = items.flat().map(specOf).map((s) => ({ ...s, ...enc(o) }));
-    this._run(N.beginPlay(JSON.stringify(specs)));
+    this._run(this._begin(N.beginPlay(JSON.stringify(specs))));
     return this;
   }
-  wait(seconds = 1) { this._run(N.beginWait(seconds)); return this; }
+  wait(seconds = 1) { this._run(this._begin(N.beginWait(seconds))); return this; }
   /** Name this moment (e.g. where a narration line starts). Returns the time. */
   mark(name) { return N.mark(String(name), "marker"); }
   /** Start a chapter here. Returns the time. */
@@ -701,17 +706,18 @@ export class Scene {
   inspect() { return JSON.parse(N.inspect()); }
   _addUpdater(m, fn) { this._updaters.push({ m, fn }); fn(m, 0); }
   _removeUpdater(m, fn) { this._updaters = this._updaters.filter((u) => !(u.m === m && (fn == null || u.fn === fn))); }
-  _tick(dt) {
-    for (const u of this._updaters) {
+  _begin(pid) { this._segments[N.playbackSegment(pid)] = this._updaters.slice(); return pid; }
+  _tick(dt, updaters) {
+    for (const u of updaters) {
       if (u.m) u.fn(u.m, dt); else u.fn(dt);
     }
   }
-  _run(pid) {
-    if (!this._updaters.length) { N.playAll(pid); return; }
+  _run(pid, updaters = this._updaters) {
+    if (!updaters.length) { N.playAll(pid); return; }
     for (;;) {
       const dt = N.step(pid);
       if (dt < 0) break;
-      this._tick(dt);
+      this._tick(dt, updaters);
       N.endFrame(pid, dt);
     }
   }
@@ -759,6 +765,7 @@ globalThis.__manim_run = (SceneClass) => {
 };
 globalThis.__manim_seek = (t) => {
   const s = currentScene();
-  s._run(N.seekBegin(t));
+  const pid = N.seekBegin(t);
+  s._run(pid, s._segments[N.playbackSegment(pid)] ?? []);
 };
 globalThis.__manim_isScene = (v) => typeof v === "function" && (v === Scene || v.prototype instanceof Scene);
