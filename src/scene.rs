@@ -742,7 +742,7 @@ impl Scene {
         }
         p.i += 1;
         if let Some(a) = &mut p.anim {
-            a.apply(&mut self.world, p.i as f64 / p.frames as f64);
+            a.interpolate(&mut self.world, p.i as f64 / p.frames as f64);
         }
         Some(p.dt)
     }

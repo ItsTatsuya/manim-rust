@@ -5,6 +5,7 @@
 //! To mutate a mobject that already lives in a scene use
 //! `scene.modify(id, |m| m.shift(RIGHT))`.
 
+mod align;
 #[cfg(feature = "text")]
 pub mod code;
 pub mod geometry;
@@ -132,20 +133,6 @@ impl Subpath {
 
     pub fn end(&self) -> Option<Point> {
         self.curves.last().map(|c| c[3])
-    }
-
-    /// Subdivide curves until there are exactly `n` of them (Manim's `insert_n_curves`).
-    fn with_curve_count(&self, n: usize) -> Subpath {
-        let m = self.curves.len();
-        if m >= n || m == 0 {
-            return self.clone();
-        }
-        let mut splits = vec![0usize; m];
-        for i in 0..n {
-            splits[i * m / n] += 1;
-        }
-        let curves = self.curves.iter().zip(splits).flat_map(|(c, k)| bezier::subdivide(c, k)).collect();
-        Subpath { curves, closed: self.closed }
     }
 }
 
@@ -825,30 +812,12 @@ fn collapsed_copies(leaves: &[VMobject], at: Point) -> Vec<VMobject> {
         .collect()
 }
 
-fn repeat_to(v: &[VMobject], n: usize) -> Vec<VMobject> {
-    let m = v.len();
-    (0..n).map(|i| v[i * m / n].clone()).collect()
-}
-
-fn align_leaf_points(a: &mut VMobject, b: &mut VMobject) {
-    let pad = |m: &mut VMobject, n: usize| {
-        let at = m.subpaths.last().and_then(|s| s.end()).unwrap_or_else(|| m.get_center());
-        while m.subpaths.len() < n {
-            m.subpaths.push(Subpath::degenerate(at));
-        }
-    };
-    let n = a.subpaths.len().max(b.subpaths.len());
-    pad(a, n);
-    pad(b, n);
-    for (sa, sb) in a.subpaths.iter_mut().zip(b.subpaths.iter_mut()) {
-        let k = sa.curves.len().max(sb.curves.len());
-        *sa = sa.with_curve_count(k);
-        *sb = sb.with_curve_count(k);
-    }
-}
-
 /// Make two mobjects structurally compatible: equal leaf counts, subpath counts and curve counts.
 /// Returns the flattened, aligned leaves of each.
+///
+/// Unlike Manim CE (pairing by index), leaves pair up in reading order by position and
+/// shape, subpaths by size and position, and closed paths start where they travel least;
+/// see the `align` module.
 pub fn align(a: &VMobject, b: &VMobject) -> (Vec<VMobject>, Vec<VMobject>) {
     let mut la = a.leaves();
     let mut lb = b.leaves();
@@ -865,18 +834,10 @@ pub fn align(a: &VMobject, b: &VMobject) -> (Vec<VMobject>, Vec<VMobject>) {
             l.stroke_opacity = 0.0;
         }
     }
-    let n = la.len().max(lb.len());
-    if la.len() < n {
-        la = repeat_to(&la, n);
-    }
-    if lb.len() < n {
-        lb = repeat_to(&lb, n);
-    }
-    for (x, y) in la.iter_mut().zip(lb.iter_mut()) {
-        align_leaf_points(x, y);
-    }
-    (la, lb)
+    align::align_leaves(la, lb)
 }
+
+pub(crate) use align::{match_invisible_style, same_shape};
 
 /// How points travel during an interpolation.
 #[derive(Clone, Copy, Debug)]

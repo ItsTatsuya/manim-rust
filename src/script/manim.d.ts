@@ -475,8 +475,25 @@ declare module "manim" {
   export const Uncreate: A<[m: Mobject, options?: AnimationOptions]>;
   /** Handwriting reveal; timing scales with the number of glyphs. */
   export const Write: A<[m: Mobject, options?: AnimationOptions]>;
+  /** Write backwards, erasing from the last glyph; removes the mobject. */
   export const Unwrite: A<[m: Mobject, options?: AnimationOptions]>;
-  export const AddTextLetterByLetter: A<[m: Mobject, options?: AnimationOptions]>;
+  /** Letters appear one at a time (`timePerChar` seconds each, default 0.1, unless `runTime` is set). */
+  export const AddTextLetterByLetter: A<[m: Mobject, options?: AnimationOptions & { timePerChar?: number }]>;
+  /** Letters disappear one at a time, last first; removes the mobject. */
+  export const RemoveTextLetterByLetter: A<[m: Mobject, options?: AnimationOptions & { timePerChar?: number }]>;
+  /** Letter-by-letter typing with `cursor` riding after the last letter. */
+  export const TypeWithCursor: A<[m: Mobject, cursor: Mobject, options?: AnimationOptions & TypeOptions]>;
+  /** Letter-by-letter deleting, last first, with `cursor` following; removes the text. */
+  export const UntypeWithCursor: A<[m: Mobject, cursor: Mobject, options?: AnimationOptions & TypeOptions]>;
+  export interface TypeOptions {
+    timePerChar?: number;
+    /** Gap between the last letter and the cursor (default 0.1). */
+    buff?: number;
+    /** Keep the cursor at its own height (default true) instead of each letter's. */
+    keepCursorY?: boolean;
+    /** Leave the cursor on screen afterwards (default true). */
+    leaveCursorOn?: boolean;
+  }
   export const DrawBorderThenFill: A<[m: Mobject, options?: AnimationOptions]>;
   export const ShowPassingFlash: A<[m: Mobject, options?: AnimationOptions & { timeWidth?: number }]>;
   export const GrowFromCenter: A<[m: Mobject, options?: AnimationOptions]>;
@@ -492,7 +509,12 @@ declare module "manim" {
   /** `a` morphs into `b`, then `b` replaces `a` in the scene. */
   export const ReplacementTransform: A<[a: Mobject, b: Mobject, options?: AnimationOptions & { pathArc?: number }]>;
   export const TransformFromCopy: A<[a: Mobject, b: Mobject, options?: AnimationOptions & { pathArc?: number }]>;
+  /** Cross-fade: `a` stretches onto `b` fading out while `b` grows out of `a` fading in; `b` replaces `a`. */
   export const FadeTransform: A<[a: Mobject, b: Mobject, options?: AnimationOptions]>;
+  /** Pieces with the same shape (the same glyph, at any size) move onto each other; the rest fade. `b` replaces `a`. */
+  export const TransformMatchingShapes: A<[a: Mobject, b: Mobject, options?: AnimationOptions & { transformMismatches?: boolean }]>;
+  /** TransformMatchingShapes for equations (glyphs are matched by shape). */
+  export const TransformMatchingTex: A<[a: Mobject, b: Mobject, options?: AnimationOptions & { transformMismatches?: boolean }]>;
   export const Rotate: A<[m: Mobject, angle?: number, options?: AnimationOptions & { about?: Point }]>;
   export const Rotating: typeof Rotate;
   export const MoveAlongPath: A<[m: Mobject, path: Mobject, options?: AnimationOptions]>;

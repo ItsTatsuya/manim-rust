@@ -6,7 +6,7 @@ use std::rc::Rc;
 use super::{impl_config, AnimConfig, Animation};
 use crate::color::{Color, YELLOW};
 use crate::constants::*;
-use crate::mobject::{align, lerp_leaves, PathFunc, VMobject};
+use crate::mobject::{align, lerp_leaves, same_shape, PathFunc, VMobject};
 use crate::rate_functions;
 use crate::world::{MobjectId, World};
 
@@ -24,6 +24,13 @@ enum Kind {
     Transform(Box<VMobject>),
     Replacement(MobjectId),
     FromCopy(MobjectId),
+    /// Cross-fade: each side stretches to the other's box while fading.
+    FadeTransform(MobjectId),
+    /// Matching pieces morph, the rest fade (`transform_mismatches`: morph them too).
+    Matching {
+        to: MobjectId,
+        transform_mismatches: bool,
+    },
     Animate(Rc<AnimateCell>),
     FadeIn,
     FadeOut,
@@ -76,6 +83,14 @@ impl Morph {
         self
     }
 
+    /// For matching transforms: morph unmatched pieces into each other instead of fading.
+    pub fn transform_mismatches(mut self, on: bool) -> Self {
+        if let Kind::Matching { transform_mismatches, .. } = &mut self.kind {
+            *transform_mismatches = on;
+        }
+        self
+    }
+
     /// For fades: travel by this vector while fading.
     pub fn shift(mut self, v: Point) -> Self {
         self.shift = v;
@@ -113,6 +128,38 @@ impl TransformFromCopy {
     #[allow(clippy::new_ret_no_self)]
     pub fn new(a: MobjectId, b: MobjectId) -> Morph {
         Morph::make(a, Kind::FromCopy(b), "TransformFromCopy")
+    }
+}
+
+pub struct FadeTransform;
+impl FadeTransform {
+    /// Cross-fade `a` into `b`: `a` stretches onto `b`'s box while fading out, `b` grows
+    /// out of `a`'s box while fading in; `b` then replaces `a` in the scene (Manim CE's
+    /// `FadeTransform` with `stretch=True`).
+    #[allow(clippy::new_ret_no_self)]
+    pub fn new(a: MobjectId, b: MobjectId) -> Morph {
+        Morph::make(a, Kind::FadeTransform(b), "FadeTransform")
+    }
+}
+
+pub struct TransformMatchingShapes;
+impl TransformMatchingShapes {
+    /// Pieces of `a` with the same shape as pieces of `b` (the same glyph, at any size)
+    /// move onto them; the others fade out and in. `b` then replaces `a` in the scene.
+    #[allow(clippy::new_ret_no_self)]
+    pub fn new(a: MobjectId, b: MobjectId) -> Morph {
+        Morph::make(a, Kind::Matching { to: b, transform_mismatches: false }, "TransformMatchingShapes")
+    }
+}
+
+pub struct TransformMatchingTex;
+impl TransformMatchingTex {
+    /// [`TransformMatchingShapes`] for equations. Manim CE matches by TeX substring; here
+    /// an equation is one typeset piece, so glyphs are matched by shape, which also pairs
+    /// up symbols that moved inside a substring.
+    #[allow(clippy::new_ret_no_self)]
+    pub fn new(a: MobjectId, b: MobjectId) -> Morph {
+        Morph::make(a, Kind::Matching { to: b, transform_mismatches: false }, "TransformMatchingTex")
     }
 }
 
@@ -206,10 +253,21 @@ impl Animation for Morph {
         let orig = w[self.id].clone();
         self.z_index = orig.z_index;
         let hidden = |m: VMobject| m.set_opacity(0.0);
+        let mut aligned = None;
         let (start, end, final_state) = match &mut self.kind {
             Kind::Transform(t) => (orig, (**t).clone(), Some((**t).clone())),
             Kind::Replacement(b) | Kind::FromCopy(b) => {
                 let t = w[*b].clone();
+                (orig, t, None)
+            }
+            Kind::FadeTransform(b) => {
+                let t = w[*b].clone();
+                aligned = Some(fade_transform(&orig, &t));
+                (orig, t, None)
+            }
+            Kind::Matching { to, transform_mismatches } => {
+                let t = w[*to].clone();
+                aligned = Some(matching(&orig, &t, *transform_mismatches));
                 (orig, t, None)
             }
             Kind::Animate(cell) => {
@@ -258,7 +316,7 @@ impl Animation for Morph {
         if let Kind::FromCopy(_) = self.kind {
             self.work = w.insert(start.clone());
         }
-        let (a, b) = align(&start, &end);
+        let (a, b) = aligned.unwrap_or_else(|| align(&start, &end));
         self.start = a;
         self.end = b;
         self.final_state = final_state;
@@ -271,7 +329,7 @@ impl Animation for Morph {
 
     fn clean_up(&mut self, w: &mut World) {
         match self.kind {
-            Kind::Replacement(b) => {
+            Kind::Replacement(b) | Kind::FadeTransform(b) | Kind::Matching { to: b, .. } => {
                 w.replace_in_display(self.id, b);
             }
             Kind::FromCopy(b) => {
@@ -287,4 +345,90 @@ impl Animation for Morph {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------- cross-fades and matching
+
+/// Stretch `m` so its box becomes `to`'s (a flat side keeps its size and is only moved).
+fn stretch_onto(m: &VMobject, to: &VMobject) -> VMobject {
+    let (Some((a0, a1)), Some((b0, b1))) = (m.bounding_box(), to.bounding_box()) else { return m.clone() };
+    let axis = |v: f64, a0: f64, a1: f64, b0: f64, b1: f64| {
+        if (a1 - a0).abs() < 1e-9 {
+            v - (a0 + a1) / 2.0 + (b0 + b1) / 2.0
+        } else {
+            b0 + (v - a0) / (a1 - a0) * (b1 - b0)
+        }
+    };
+    m.clone()
+        .apply_function(move |p| Point::new(axis(p.x, a0.x, a1.x, b0.x, b1.x), axis(p.y, a0.y, a1.y, b0.y, b1.y), p.z))
+}
+
+fn fade_transform(a: &VMobject, b: &VMobject) -> (Vec<VMobject>, Vec<VMobject>) {
+    let mut start = a.leaves();
+    start.extend(stretch_onto(b, a).set_opacity(0.0).leaves());
+    let mut end = stretch_onto(a, b).set_opacity(0.0).leaves();
+    end.extend(b.leaves());
+    (start, end)
+}
+
+/// Sort leaves into classes of the same shape; per class, the indices into `la` and `lb`.
+fn shape_classes(la: &[VMobject], lb: &[VMobject]) -> Vec<(Vec<usize>, Vec<usize>)> {
+    let mut reps: Vec<&VMobject> = Vec::new();
+    let mut classes: Vec<(Vec<usize>, Vec<usize>)> = Vec::new();
+    for (side, leaves) in [la, lb].into_iter().enumerate() {
+        for (i, leaf) in leaves.iter().enumerate() {
+            let k = match reps.iter().position(|r| same_shape(r, leaf)) {
+                Some(k) => k,
+                None => {
+                    reps.push(leaf);
+                    classes.push((Vec::new(), Vec::new()));
+                    reps.len() - 1
+                }
+            };
+            if side == 0 {
+                classes[k].0.push(i);
+            } else {
+                classes[k].1.push(i);
+            }
+        }
+    }
+    classes
+}
+
+fn matching(a: &VMobject, b: &VMobject, transform_mismatches: bool) -> (Vec<VMobject>, Vec<VMobject>) {
+    let (la, lb) = (a.leaves(), b.leaves());
+    let pick = |v: &[VMobject], idx: &[usize]| VMobject::group(idx.iter().map(|&i| v[i].clone()).collect());
+    let (mut start, mut end) = (Vec::new(), Vec::new());
+    let (mut lone_a, mut lone_b) = (Vec::new(), Vec::new());
+    for (ia, ib) in shape_classes(&la, &lb) {
+        if ia.is_empty() || ib.is_empty() {
+            lone_a.extend(ia);
+            lone_b.extend(ib);
+            continue;
+        }
+        let (s, e) = align(&pick(&la, &ia), &pick(&lb, &ib));
+        start.extend(s);
+        end.extend(e);
+    }
+    lone_a.sort_unstable();
+    lone_b.sort_unstable();
+    let (ga, gb) = (pick(&la, &lone_a), pick(&lb, &lone_b));
+    if transform_mismatches && !lone_a.is_empty() && !lone_b.is_empty() {
+        let (s, e) = align(&ga, &gb);
+        start.extend(s);
+        end.extend(e);
+    } else {
+        // As in Manim CE: leftovers of `a` fade out drifting toward `b`'s leftovers, and
+        // `b`'s leftovers fade in where they stand.
+        let drift = if lone_a.is_empty() || lone_b.is_empty() { ORIGIN } else { gb.get_center() - ga.get_center() };
+        for &i in &lone_a {
+            start.push(la[i].clone());
+            end.push(la[i].clone().shift(drift).set_opacity(0.0));
+        }
+        for &j in &lone_b {
+            start.push(lb[j].clone().set_opacity(0.0));
+            end.push(lb[j].clone());
+        }
+    }
+    (start, end)
 }

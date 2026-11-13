@@ -415,3 +415,79 @@ export class MobjectLater extends Scene {
         assert!(early != mid && mid != late);
     }
 }
+
+/// The text and morph animations keep the host contract Studio's retiming relies on:
+/// one play per `play()`, one wait per `wait()`, and a play lasts exactly its `runTime`
+/// (per-glyph lag stays inside it). Defaults follow Manim CE.
+#[test]
+fn text_and_morph_animations_keep_play_timing() {
+    let d = dir("text-morph");
+    let p = write(
+        &d,
+        "tm.ts",
+        r##"
+import { Scene, Text, MathTex, Rectangle, Write, Unwrite, AddTextLetterByLetter, RemoveTextLetterByLetter,
+  TypeWithCursor, UntypeWithCursor, Transform, ReplacementTransform, TransformMatchingShapes,
+  TransformMatchingTex, FadeTransform, FadeIn } from "manim";
+export default class T extends Scene {
+  construct() {
+    const t = Text("hello there");
+    this.play(Write(t), { runTime: 1.3 });
+    this.play(Unwrite(t), { runTime: 0.7 });
+    const u = Text("abc");
+    this.play(AddTextLetterByLetter(u));                        // 3 letters: 0.3 s
+    this.play(RemoveTextLetterByLetter(u, { runTime: 0.4 }));
+    const cursor = Rectangle(0.05, 0.5);
+    const v = Text("xy");
+    this.play(TypeWithCursor(v, cursor, { timePerChar: 0.2 }));  // 0.4 s
+    this.play(UntypeWithCursor(v, cursor, { leaveCursorOn: false }));
+    const a = MathTex("a + b"), b = MathTex("b + a"), c = MathTex("b - a");
+    this.add(a);
+    this.play(TransformMatchingShapes(a, b), { runTime: 1.1 });
+    this.play(TransformMatchingTex(b, c, { transformMismatches: true }));
+    const w = Text("one");
+    this.play(FadeIn(w));
+    this.play(FadeTransform(w, Text("two")), { runTime: 0.9 });
+    this.wait(0.5);
+    this.play(Transform(c, Text("done")), ReplacementTransform(cursor, Text("!")), { runTime: 0.6 });
+  }
+}
+"##,
+    );
+    let host = ScriptHost::load(&p, HostOptions::default()).unwrap();
+    let mut c = cfg();
+    c.record = true;
+    host.run("T", &c).unwrap();
+    let tl = host.timeline().unwrap();
+    let got: Vec<(String, f64, bool)> = tl.plays.iter().map(|p| (p.name.clone(), p.run_time, p.wait)).collect();
+    let want = [
+        ("Write", 1.3, false),
+        ("Unwrite", 0.7, false),
+        ("AddTextLetterByLetter", 0.3, false),
+        ("RemoveTextLetterByLetter", 0.4, false),
+        ("TypeWithCursor", 0.4, false),
+        ("UntypeWithCursor", 0.2, false),
+        ("TransformMatchingShapes", 1.1, false),
+        ("TransformMatchingTex", 1.0, false),
+        ("FadeIn", 1.0, false),
+        ("FadeTransform", 0.9, false),
+        ("Wait", 0.5, true),
+        ("Transform, ReplacementTransform", 0.6, false),
+    ];
+    assert_eq!(got.len(), want.len(), "{got:?}");
+    for ((name, rt, wait), (wn, wrt, ww)) in got.iter().zip(want) {
+        assert_eq!((name.as_str(), *wait), (wn, ww));
+        assert!((rt - wrt).abs() < 1e-9, "{name}: run time {rt}, expected {wrt}");
+    }
+    let fps = c.fps;
+    for p in &tl.plays {
+        let expect = if p.wait { (p.run_time * fps + 1e-6).floor() } else { (p.run_time * fps - 1e-6).ceil() };
+        assert_eq!(p.frames as f64, expect, "{}: frames follow the run time", p.name);
+    }
+    // Every moment can be seeked to.
+    for k in 0..=20 {
+        host.frame_at(tl.duration * k as f64 / 20.0).unwrap();
+    }
+    let shown = host.with_scene(|s| s.inspect().len()).unwrap();
+    assert_eq!(shown, 3, "\"two\", \"done\" and \"!\" remain; the unwritten, removed and untyped text is gone");
+}

@@ -84,8 +84,22 @@ difference that matters when you use it.
   the animation finishes, the original hierarchy (or the target's, for transforms) comes
   back. Code that reads `s[id].children` from an updater *during* a `play` sees the
   flattened version.
-- `FadeOut`, `Uncreate`, `ShrinkToCenter` and `ShowPassingFlash` hide the mobject and
-  restore its original geometry, so `s.show(id)` brings it back intact.
+- `FadeOut`, `Uncreate`, `Unwrite`, `RemoveTextLetterByLetter`, `ShrinkToCenter` and
+  `ShowPassingFlash` hide the mobject and restore its original geometry, so `s.show(id)`
+  brings it back intact.
+- **Morph correspondence** goes beyond Manim's pairing by index. When two mobjects have
+  different glyph counts, glyphs pair up in reading order by position and shape, so
+  `A = π r · r` → `A = π r²` keeps `A`, `=`, `π` and `r` in place. Subpaths pair by size
+  and position, and an extra contour (the hole of an `o`) shrinks into its own center.
+  Closed paths are given the same winding direction and the start point that travels
+  least, so shapes don't twist. A fill or stroke that is invisible on one side takes the
+  other side's color. Colors still blend in RGB, as in Manim.
+- `TransformMatchingTex` matches glyphs by shape, because an equation here is one
+  typeset piece with no TeX substrings. It behaves like `TransformMatchingShapes`, and
+  also pairs symbols that moved within a substring.
+- Staggered animations (`Create` on a group or text, `Write`) ease each part separately,
+  as Manim does. The stagger stays inside the run time, so a play always lasts exactly
+  its `run_time`.
 - Updaters always receive `dt`. Python distinguishes `lambda m:` from `lambda m, dt:`.
 - `to_edge` and `to_corner` assume a 16:9 frame, like Manim's defaults.
 

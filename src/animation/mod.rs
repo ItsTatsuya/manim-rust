@@ -69,6 +69,13 @@ pub trait Animation: AnimClone {
     fn begin(&mut self, w: &mut World);
     /// `alpha` has the rate function applied.
     fn apply(&mut self, w: &mut World, alpha: f64);
+    /// Show the frame at raw progress `t` (0 → 1, before the rate function). The default
+    /// eases `t` and calls [`Animation::apply`]. Animations that stagger parts override it
+    /// to ease each part on its own, as Manim CE does (`Create` on a group or text).
+    fn interpolate(&mut self, w: &mut World, t: f64) {
+        let f = self.config().rate_func;
+        self.apply(w, f(t));
+    }
     fn clean_up(&mut self, _w: &mut World) {}
 }
 
@@ -90,6 +97,9 @@ impl Animation for Box<dyn Animation> {
     }
     fn apply(&mut self, w: &mut World, alpha: f64) {
         (**self).apply(w, alpha)
+    }
+    fn interpolate(&mut self, w: &mut World, t: f64) {
+        (**self).interpolate(w, t)
     }
     fn clean_up(&mut self, w: &mut World) {
         (**self).clean_up(w)
@@ -224,8 +234,7 @@ impl AnimationGroup {
     fn finish_child(&mut self, i: usize, w: &mut World) {
         self.start_child(i, w);
         if self.state[i] == ChildState::Running {
-            let f = self.anims[i].config().rate_func;
-            self.anims[i].apply(w, f(1.0));
+            self.anims[i].interpolate(w, 1.0);
             self.anims[i].clean_up(w);
             self.state[i] = ChildState::Done;
         }
@@ -302,8 +311,7 @@ impl Animation for AnimationGroup {
                 self.finish_child(i, w);
             } else {
                 self.start_child(i, w);
-                let f = self.anims[i].config().rate_func;
-                self.anims[i].apply(w, f(sub));
+                self.anims[i].interpolate(w, sub);
             }
         }
     }

@@ -70,8 +70,16 @@ required-features = ["text"]
 name = "tables"
 required-features = ["text", "math"]
 
+[[example]]
+name = "anim_gallery"
+required-features = ["script", "math"]
+
 [[test]]
 name = "animations"
+required-features = ["text"]
+
+[[test]]
+name = "morphing"
 required-features = ["text"]
 
 [[test]]

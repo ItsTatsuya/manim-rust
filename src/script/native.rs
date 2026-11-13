@@ -1150,8 +1150,40 @@ fn build_anim(st: &mut State, spec: &Value, pops: &mut Vec<Pop>) -> Result<Built
             Box::new(morph_opts(FadeOut::new(id), st)?)
         }
         "Create" => Box::new(Create::new(target(st, pops)?)),
-        "Uncreate" | "Unwrite" => Box::new(Uncreate::new(target(st, pops)?)),
-        "Write" | "AddTextLetterByLetter" => Box::new(Write::new(target(st, pops)?)),
+        "Uncreate" => Box::new(Uncreate::new(target(st, pops)?)),
+        "Write" => Box::new(Write::new(target(st, pops)?)),
+        "Unwrite" => Box::new(Unwrite::new(target(st, pops)?)),
+        "AddTextLetterByLetter" | "RemoveTextLetterByLetter" | "TypeWithCursor" | "UntypeWithCursor" => {
+            let id = target(st, pops)?;
+            let cursor = match ty {
+                "TypeWithCursor" | "UntypeWithCursor" => {
+                    let h =
+                        spec.get("cursor").and_then(mob_ref).with_context(|| format!("{ty} needs a cursor mobject"))?;
+                    Some(ensure_in_world(st, h, true, pops)?)
+                }
+                _ => None,
+            };
+            let mut a = match (ty, cursor) {
+                ("AddTextLetterByLetter", _) => AddTextLetterByLetter::new(id),
+                ("RemoveTextLetterByLetter", _) => RemoveTextLetterByLetter::new(id),
+                ("TypeWithCursor", Some(c)) => TypeWithCursor::new(id, c),
+                (_, Some(c)) => UntypeWithCursor::new(id, c),
+                _ => unreachable!(),
+            };
+            if let Some(t) = opt_num(spec, "timePerChar") {
+                a = a.time_per_char(t);
+            }
+            if let Some(b) = opt_num(spec, "buff") {
+                a = a.buff(b);
+            }
+            if let Some(k) = spec.get("keepCursorY").and_then(Value::as_bool) {
+                a = a.keep_cursor_y(k);
+            }
+            if let Some(k) = spec.get("leaveCursorOn").and_then(Value::as_bool) {
+                a = a.leave_cursor_on(k);
+            }
+            Box::new(a)
+        }
         "DrawBorderThenFill" => Box::new(DrawBorderThenFill::new(target(st, pops)?)),
         "ShowPassingFlash" => {
             let a = ShowPassingFlash::new(target(st, pops)?);
@@ -1182,7 +1214,12 @@ fn build_anim(st: &mut State, spec: &Value, pops: &mut Vec<Pop>) -> Result<Built
             let c = opt_color(spec, "color")?.unwrap_or(YELLOW_C);
             Box::new(Indicate::with(id, opt_num(spec, "scaleFactor").unwrap_or(1.2), c))
         }
-        "Transform" | "ReplacementTransform" | "TransformFromCopy" | "FadeTransform" => {
+        "Transform"
+        | "ReplacementTransform"
+        | "TransformFromCopy"
+        | "FadeTransform"
+        | "TransformMatchingShapes"
+        | "TransformMatchingTex" => {
             let to_h = spec.get("to").and_then(mob_ref).with_context(|| format!("{ty} needs a target mobject"))?;
             let id = target(st, pops)?;
             let m = match ty {
@@ -1193,6 +1230,19 @@ fn build_anim(st: &mut State, spec: &Value, pops: &mut Vec<Pop>) -> Result<Built
                 "TransformFromCopy" => {
                     let b = ensure_in_world(st, to_h, false, pops)?;
                     TransformFromCopy::new(id, b)
+                }
+                "FadeTransform" => {
+                    let b = ensure_in_world(st, to_h, false, pops)?;
+                    FadeTransform::new(id, b)
+                }
+                "TransformMatchingShapes" | "TransformMatchingTex" => {
+                    let b = ensure_in_world(st, to_h, false, pops)?;
+                    let m = if ty == "TransformMatchingTex" {
+                        TransformMatchingTex::new(id, b)
+                    } else {
+                        TransformMatchingShapes::new(id, b)
+                    };
+                    m.transform_mismatches(spec.get("transformMismatches").and_then(Value::as_bool).unwrap_or(false))
                 }
                 _ => {
                     let b = ensure_in_world(st, to_h, false, pops)?;
