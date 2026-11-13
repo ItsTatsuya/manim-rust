@@ -78,6 +78,10 @@ required-features = ["text"]
 name = "rendering"
 required-features = ["text", "vello"]
 
+[[test]]
+name = "studio"
+required-features = ["text"]
+
 # Keep dependencies (rasterizers, encoders) fast even in debug builds.
 [profile.dev.package."*"]
 opt-level = 3

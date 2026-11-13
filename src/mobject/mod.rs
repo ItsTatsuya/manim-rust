@@ -27,7 +27,7 @@ impl RasterImage {
     /// Build from straight (non-premultiplied) RGBA8 pixels.
     pub fn from_rgba(width: u32, height: u32, mut rgba: Vec<u8>) -> Self {
         assert_eq!(rgba.len(), width as usize * height as usize * 4, "RGBA buffer size");
-        for px in rgba.chunks_exact_mut(4) {
+        for px in rgba.as_chunks_mut::<4>().0 {
             let a = px[3] as u16;
             if a < 255 {
                 for c in &mut px[..3] {

@@ -7,10 +7,10 @@
 //! - `gpu::GpuRenderer` (feature `gpu`): wgpu + lyon tessellation, 4× MSAA.
 
 pub mod cpu;
-#[cfg(feature = "vello")]
-pub mod vello;
 #[cfg(feature = "gpu")]
 pub mod gpu;
+#[cfg(feature = "vello")]
+pub mod vello;
 
 use std::sync::Arc;
 
@@ -132,7 +132,9 @@ pub fn create(kind: RendererKind, width: u32, height: u32) -> Result<Box<dyn Ren
         #[cfg(feature = "vello")]
         RendererKind::Vello => Ok(Box::new(cpu::CpuRenderer::with_raster(cpu::Raster::Vello))),
         #[cfg(not(feature = "vello"))]
-        RendererKind::Vello => anyhow::bail!("vello renderer requested but manim was built without the `vello` feature"),
+        RendererKind::Vello => {
+            anyhow::bail!("vello renderer requested but manim was built without the `vello` feature")
+        }
         #[cfg(feature = "gpu")]
         RendererKind::Gpu => Ok(Box::new(gpu::GpuRenderer::new(width, height, false)?)),
         #[cfg(not(feature = "gpu"))]
