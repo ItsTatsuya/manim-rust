@@ -575,7 +575,7 @@ export class B extends Scene {
 
 #[test]
 fn timeout_stops_long_native_waits() {
-    let d = dir("timeout");
+    let d = dir("native-timeout");
     let p = write(
         &d,
         "slow.ts",
