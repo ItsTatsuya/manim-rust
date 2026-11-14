@@ -592,3 +592,59 @@ export default class Slow extends Scene {
     assert!(host.run("Slow", &cfg()).is_err());
     assert!(t.elapsed() < Duration::from_secs(10), "took {:?}", t.elapsed());
 }
+
+#[test]
+fn animating_a_member_of_an_offscreen_group_keeps_it_on_screen() {
+    let d = dir("member");
+    let p = write(
+        &d,
+        "member.ts",
+        r##"
+import { Scene, Text, VGroup, FadeIn, FadeOut, DOWN, ORIGIN } from "manim";
+export class Member extends Scene {
+  construct() {
+    const a = Text("Plain").shift(DOWN);
+    const b = Text("Grouped");
+    const c = Text("Other");
+    VGroup(b, c).arrange(DOWN).moveTo(ORIGIN).shift([0, 2, 0]);
+    this.play(FadeIn(a), FadeIn(b));
+    this.wait(0.5);
+  }
+}
+export class Rejoin extends Scene {
+  construct() {
+    const b = Text("Grouped");
+    const c = Text("Other");
+    const g = VGroup(b, c).arrange(DOWN);
+    this.play(FadeIn(b));
+    this.add(g);
+    this.wait(0.2);
+  }
+}
+"##,
+    );
+    let host = ScriptHost::load(&p, HostOptions::default()).unwrap();
+    let mut c = cfg();
+    c.record = true;
+    let labels = |host: &ScriptHost| -> Vec<String> {
+        host.with_scene(|s| s.inspect().into_iter().map(|i| i.label).collect()).unwrap()
+    };
+
+    host.run("Member", &c).unwrap();
+    let l = labels(&host);
+    assert!(l.iter().any(|x| x == "Grouped"), "after the play: {l:?}");
+    host.seek(1.2).unwrap();
+    assert!(labels(&host).iter().any(|x| x == "Grouped"), "during the wait after seeking");
+
+    // When the group itself joins, the member goes back into it: drawn once, not twice.
+    host.run("Rejoin", &c).unwrap();
+    let (tops, members) = host
+        .with_scene(|s| {
+            let ids = s.mobjects();
+            let g = &s[ids[0]];
+            (ids.len(), g.children.iter().map(|m| m.text().unwrap_or("").to_string()).collect::<Vec<_>>())
+        })
+        .unwrap();
+    assert_eq!(tops, 1, "the member was drawn twice");
+    assert_eq!(members, ["Grouped", "Other"]);
+}

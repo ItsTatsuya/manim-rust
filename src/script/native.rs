@@ -53,6 +53,9 @@ pub(crate) struct State {
     by_id: HashMap<MobjectId, u32>,
     playbacks: HashMap<u32, (Playback, Vec<Pop>)>,
     next_playback: u32,
+    /// Members of a group that is not in the scene, left on screen after a play
+    /// (`FadeIn(member)`): they return to the group when the group itself joins the scene.
+    loans: Vec<Pop>,
     pub base_dir: PathBuf,
     pub sandbox: Option<PathBuf>,
 }
@@ -77,6 +80,7 @@ impl State {
         self.slots = initial.to_vec();
         self.by_id.clear();
         self.playbacks.clear();
+        self.loans.clear();
     }
 }
 
@@ -273,6 +277,9 @@ fn get_mob(st: &mut State, h: u32) -> Result<VMobject> {
 /// World id for a handle, inserting it if needed (`show` displays new ones).
 /// Views are popped out of their group; the pops are returned for `push_back`.
 fn ensure_in_world(st: &mut State, h: u32, show: bool, pops: &mut Vec<Pop>) -> Result<MobjectId> {
+    if !matches!(slot(st, h)?, Slot::Attached(_)) {
+        reclaim_loans(st, h)?;
+    }
     match slot(st, h)? {
         Slot::Attached(id) => Ok(id),
         Slot::Detached(m) => {
@@ -306,14 +313,19 @@ fn is_shown(st: &mut State, h: u32) -> Result<bool> {
 /// Put popped views back into their groups after a play.
 fn push_back(st: &mut State, pops: Vec<Pop>) -> Result<()> {
     for p in pops.into_iter().rev() {
-        let (value, shown) = {
-            let s = scene(st)?;
-            (s.world()[p.id].clone(), s.world().is_displayed(p.id))
-        };
+        // Only restore if the slot is still the popped one (it may have been regrouped).
+        let still_popped = matches!(st.slots.get(p.handle as usize), Some(Slot::Attached(id)) if *id == p.id);
+        let shown = scene(st)?.world().is_displayed(p.id);
+        if still_popped && shown && !is_shown(st, p.root)? {
+            // The group is not in the scene, so returning the member to it would take it
+            // off screen. Keep it in the scene (as Manim does) until the group joins.
+            st.loans.push(p);
+            continue;
+        }
+        let value = scene(st)?.world()[p.id].clone();
         scene(st)?.world_mut().remove_everywhere(p.id);
         st.by_id.remove(&p.id);
-        // Only restore if the slot is still the popped one (it may have been regrouped).
-        if !matches!(st.slots.get(p.handle as usize), Some(Slot::Attached(id)) if *id == p.id) {
+        if !still_popped {
             continue;
         }
         if shown {
@@ -324,6 +336,31 @@ fn push_back(st: &mut State, pops: Vec<Pop>) -> Result<()> {
             st.slots[p.handle as usize] = Slot::Detached(value);
         }
     }
+    Ok(())
+}
+
+/// Return loaned members of `h` (or of groups inside it) to their places before `h`
+/// itself joins the scene, so they are not drawn twice and move with the group.
+fn reclaim_loans(st: &mut State, h: u32) -> Result<()> {
+    let loans = std::mem::take(&mut st.loans);
+    let mut keep = Vec::new();
+    for p in loans {
+        let still_loaned = matches!(st.slots.get(p.handle as usize), Some(Slot::Attached(id)) if *id == p.id)
+            && scene(st)?.world().contains(p.id);
+        if !still_loaned {
+            continue; // regrouped or removed since: nothing to return
+        }
+        if !is_self_or_ancestor(st, p.root, h)? {
+            keep.push(p);
+            continue;
+        }
+        let value = scene(st)?.world()[p.id].clone();
+        scene(st)?.world_mut().remove_everywhere(p.id);
+        st.by_id.remove(&p.id);
+        st.slots[p.handle as usize] = Slot::View { root: p.root, path: p.path.clone() };
+        with_mob(st, p.handle, |m| *m = value)?;
+    }
+    st.loans.extend(keep);
     Ok(())
 }
 
