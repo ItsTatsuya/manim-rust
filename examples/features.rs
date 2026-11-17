@@ -43,7 +43,11 @@ fn main() -> anyhow::Result<()> {
                 px.extend_from_slice(&[(x * 255 / w) as u8, (y * 255 / h) as u8, 200, 255]);
             }
         }
-        let img = ImageMobject::from_rgba(w, h, px).set_height(1.4).rotate(0.15).move_to(pt(-4.0, -2.5));
+        let img = ImageMobject::from_rgba(w, h, px)
+            .expect("pixel buffer matches its size")
+            .set_height(1.4)
+            .rotate(0.15)
+            .move_to(pt(-4.0, -2.5));
         s.add(img);
         let note = t.text(TextRole::Hand, "the area grows with r²").move_to(pt(2.6, -2.4));
         let arrow = CurvedArrow::with_tip_length(note.get_top() + UP * 0.1, pt(3.4, -0.3), -0.6, 0.18)

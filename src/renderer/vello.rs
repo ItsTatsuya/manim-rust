@@ -12,7 +12,7 @@ use vello_cpu::kurbo::{BezPath, Cap, Join, Stroke};
 use vello_cpu::peniko::Fill;
 use vello_cpu::{PixmapMut, RasterizerSettings, RenderContext, Resources, TargetInit};
 
-use super::{DisplayList, DrawPath};
+use super::{DisplayList, DrawPath, FramePool};
 
 thread_local! {
     /// One context per rayon worker, reused across frames (its buffers are the expensive part).
@@ -53,8 +53,8 @@ fn draw_items(ctx: &mut RenderContext, items: &[DrawPath]) {
     }
 }
 
-/// Rasterize one display list into RGBA8, or `None` if it contains images.
-pub fn rasterize(dl: &DisplayList) -> Option<Vec<u8>> {
+/// Rasterize one display list into RGBA8 in a buffer from `pool`, or `None` if it contains images.
+pub fn rasterize_pooled(dl: &DisplayList, pool: &FramePool) -> Option<Vec<u8>> {
     if dl.has_images() {
         return None;
     }
@@ -63,8 +63,8 @@ pub fn rasterize(dl: &DisplayList) -> Option<Vec<u8>> {
     // A background layer is rasterized once and cached by the tiny-skia path; start from
     // that so both rasterizers produce the same base and vello only draws the scene.
     let (mut buf, init) = match &dl.background_layer {
-        Some(_) => (super::cpu::base_pixmap(dl).take(), TargetInit::SrcOver),
-        None => (vec![0u8; w as usize * h as usize * 4], TargetInit::Clear(color(dl.background))),
+        Some(_) => (super::cpu::base_pixmap(dl, pool).take(), TargetInit::SrcOver),
+        None => (pool.take(w as usize * h as usize * 4), TargetInit::Clear(color(dl.background))),
     };
     CTX.with(|cell| {
         let mut cell = cell.borrow_mut();

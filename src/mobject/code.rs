@@ -60,27 +60,37 @@ pub enum CodeBackground {
 /// A syntax-highlighted code listing (Manim's `Code`).
 #[derive(Clone, Debug)]
 pub struct Code {
+    /// The source text.
     pub code: String,
     /// Language name or alias (`"python"`, `"rs"`, `"ts"`, ...); `None` guesses.
     pub language: Option<String>,
     /// A Pygments style name: `"vim"` (Manim's default), `"monokai"`, `"dracula"`, ...
     pub formatter_style: String,
+    /// Spaces a tab expands to (default 4).
     pub tab_width: usize,
+    /// Show line numbers (default on).
     pub add_line_numbers: bool,
+    /// Number of the first line (default 1).
     pub line_numbers_from: usize,
+    /// Background shape behind the listing.
     pub background: CodeBackground,
     /// Font family; `None` uses the theme's code font, else an installed monospace font.
     pub font: Option<String>,
+    /// Font size in points (default 24).
     pub font_size: f64,
     /// Baseline-to-baseline distance in multiples of the font size.
     pub line_spacing: f64,
     /// Padding between the text and the background's edge.
     pub background_buff: f64,
+    /// Corner radius of the background in scene units (default 0.2).
     pub corner_radius: f64,
     /// Background fill; `None` uses the style's background color.
     pub background_fill: Option<Color>,
+    /// Background fill opacity (default 1).
     pub background_fill_opacity: f64,
+    /// Background outline color.
     pub background_stroke_color: Color,
+    /// Background outline width in stroke units (default 1).
     pub background_stroke_width: f64,
 }
 
@@ -118,6 +128,7 @@ impl Code {
         Ok(c)
     }
 
+    /// Set the language by name or alias (`"python"`, `"rs"`, ...).
     pub fn language(mut self, language: &str) -> Self {
         self.language = Some(language.to_string());
         self
@@ -127,48 +138,59 @@ impl Code {
         self.formatter_style = name.to_string();
         self
     }
+    /// Set the tab width in spaces.
     pub fn tab_width(mut self, n: usize) -> Self {
         self.tab_width = n;
         self
     }
+    /// Show or hide line numbers.
     pub fn line_numbers(mut self, on: bool) -> Self {
         self.add_line_numbers = on;
         self
     }
+    /// Set the number of the first line.
     pub fn line_numbers_from(mut self, first: usize) -> Self {
         self.line_numbers_from = first;
         self
     }
+    /// Set the background shape.
     pub fn background(mut self, b: CodeBackground) -> Self {
         self.background = b;
         self
     }
+    /// Set the font family.
     pub fn font(mut self, family: &str) -> Self {
         self.font = Some(family.to_string());
         self
     }
+    /// Set the font size in points.
     pub fn font_size(mut self, size: f64) -> Self {
         self.font_size = size;
         self
     }
+    /// Set the line spacing (multiples of the font size).
     pub fn line_spacing(mut self, s: f64) -> Self {
         self.line_spacing = s;
         self
     }
+    /// Set the background fill color and opacity.
     pub fn background_fill(mut self, c: Color, opacity: f64) -> Self {
         self.background_fill = Some(c);
         self.background_fill_opacity = opacity;
         self
     }
+    /// Set the background outline color and width.
     pub fn background_stroke(mut self, c: Color, width: f64) -> Self {
         self.background_stroke_color = c;
         self.background_stroke_width = width;
         self
     }
+    /// Set the background corner radius in scene units.
     pub fn corner_radius(mut self, r: f64) -> Self {
         self.corner_radius = r;
         self
     }
+    /// Set the padding between the text and the background edge in scene units.
     pub fn background_buff(mut self, b: f64) -> Self {
         self.background_buff = b;
         self
@@ -332,7 +354,7 @@ impl Code {
                 .next_to_buff(&content, UP, 0.1)
                 .align_to(&content, LEFT)
                 .shift(LEFT * 0.1);
-                let bg = rect(&VMobject::group(vec![content.clone(), buttons.clone()]));
+                let bg = rect(&VMobject::group(vec![content, buttons.clone()]));
                 bg.add(buttons.shift(UP * 0.1 + LEFT * 0.1))
             }
         };

@@ -2,8 +2,10 @@
 
 use crate::constants::Point;
 
+/// A cubic BÃ©zier segment: start anchor, two handles, end anchor.
 pub type Cubic = [Point; 4];
 
+/// Point on the curve at parameter `t` (`0` = start, `1` = end).
 pub fn point_at(c: &Cubic, t: f64) -> Point {
     let u = 1.0 - t;
     c[0] * (u * u * u) + c[1] * (3.0 * u * u * t) + c[2] * (3.0 * u * t * t) + c[3] * (t * t * t)

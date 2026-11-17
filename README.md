@@ -30,7 +30,7 @@ It renders the same scenes **5–13× faster at 480p** and **3–15× faster at 
 | GPU renderer | OpenGL (separate code path, different features) | wgpu (Vulkan / DX12 / Metal), same features as CPU |
 | Renderer choice | Manual (`--renderer`) | `auto` **times both on your scene and keeps the faster** |
 | Text | Pango + Cairo | System fonts via fontdb + ttf-parser; one mobject per glyph |
-| LaTeX (`MathTex`, `Tex`) | ✅ (requires a TeX install) | ❌ not yet |
+| LaTeX (`MathTex`, `Tex`) | ✅ (requires a TeX install) | ✅ equations in Typst math syntax (embedded compiler, no install); LaTeX syntax is not supported |
 | 3D scenes | ✅ | ❌ not yet |
 | Video encoding | PyAV + libx264, single-threaded color conversion | ffmpeg pipe, **parallel YUV conversion**, **auto hardware encoding** (NVENC / QSV / AMF) |
 | Static frames (`wait`) | Re-encoded each frame | Rasterized once, then repeated |
@@ -119,6 +119,11 @@ result, and deletes the compiled executable afterwards. The engine library stays
 Compile errors point at your `.rs` file. Every Manim flag works (`-ql`, `-s`,
 `--format gif`, …). The video goes next to the script unless you pass `-o` or `--media_dir`.
 
+The script is built against the engine source the runner was built from. If that directory
+is gone (a `cargo install` from crates.io, or a deleted checkout), `manim-rs` depends on the
+published `manim` crate of the same version instead, so the first render needs network
+access. Set `MANIM_RS_SOURCE=<checkout>` to build against a specific source tree.
+
 Or use it as a library in your own Cargo project:
 
 ```toml
@@ -147,9 +152,16 @@ same layout Manim uses. Pass `-o <dir>` for a flat `<dir>/<Scene>.mp4`.
 
 To run the bundled examples from a clone: `cargo run --release --example square_to_circle -- -ql`.
 
-**Requirements:** Rust 1.89+ (to build; `cargo build --profile dist` makes the smallest binary). ffmpeg for MP4 output: it's found on `PATH`, through
+**Requirements:** Rust 1.97+ (to build; `cargo build --profile dist` makes the smallest binary).
+ffmpeg for MP4 output: it's found on `PATH`, through
 `MANIM_FFMPEG`, via `--ffmpeg <path>`, or in winget's package folder on Windows. Without
 ffmpeg, output falls back to GIF. A GPU is optional.
+
+**Embedding in an application:** the library catches panics from scene code and reports
+them as errors, which needs unwinding. Do not build the host with `panic = "abort"`
+(the `dist` profile no longer sets it). Frame buffers in flight are capped at about
+512 MiB, so 4K renders use smaller batches than 1080p. [docs/SCRIPTING.md](docs/SCRIPTING.md)
+lists the limits scripts run under.
 
 ## Examples
 
@@ -176,6 +188,7 @@ Every scene binary accepts Manim-style flags:
 | `--renderer auto\|cpu\|gpu\|skia\|vello` | `auto` (default) benchmarks CPU and GPU on live frames at ≥1080p and keeps the faster. `cpu` times tiny-skia against vello per complexity bucket; `skia`/`vello` force one |
 | `--format auto\|mp4\|gif\|png\|none` | `auto` = MP4 if ffmpeg is found, else GIF. `none` renders and discards frames |
 | `--encoder auto\|x264\|nvenc\|qsv\|amf` | `auto` = first working hardware encoder at ≥1080p30, else x264 |
+| `--x264-preset NAME`, `--crf N` | x264 speed/size preset (`ultrafast`…`veryslow`, default `fast`) and quality (0–51, default 18); `Config::x264` in code |
 | `-o PATH` | Write `PATH/<Scene>.mp4` (or exactly `PATH` if it has an extension) instead of `media/` |
 | `--fps N`, `-r WxH`, `--media_dir DIR`, `--ffmpeg PATH` | Overrides |
 | `--gpu-info` | List GPU adapters and what `auto` would pick |

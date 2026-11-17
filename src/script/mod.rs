@@ -32,7 +32,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context as _, Result};
@@ -49,14 +49,65 @@ pub const PRELUDE: &str = include_str!("prelude.js");
 /// TypeScript declarations for the `manim` module (give these to editors and agents).
 pub const TYPES: &str = include_str!("manim.d.ts");
 
-#[derive(Clone, Debug, Default)]
+/// JS heap limit applied by default (the heap, not Rust-side mobject data).
+pub const DEFAULT_MEMORY_LIMIT: usize = 512 << 20;
+
+/// Limits and sandboxing for a [`ScriptHost`].
+#[derive(Clone, Debug)]
 pub struct HostOptions {
     /// Asset paths (images, SVGs, sounds, fonts, imported scripts) must stay in here.
     pub sandbox: Option<PathBuf>,
-    /// JS heap limit in bytes.
+    /// JS heap limit in bytes ([`DEFAULT_MEMORY_LIMIT`] by default; `None` removes it).
+    /// Mobject geometry lives on the Rust side and is bounded separately.
     pub memory_limit: Option<usize>,
-    /// Abort a script that runs longer than this (infinite loops).
+    /// Time limit for each call into the script: loading it, [`ScriptHost::run`] (the whole
+    /// `construct()`, including the frames it rasterizes and writes), `seek`, `frame_at`.
+    /// The clock restarts on every call. [`ScriptHost::finish`] (encoder flush, audio
+    /// mux) is not covered; stop that with [`ScriptHost::cancel_handle`].
     pub timeout: Option<Duration>,
+}
+
+impl Default for HostOptions {
+    fn default() -> Self {
+        HostOptions { sandbox: None, memory_limit: Some(DEFAULT_MEMORY_LIMIT), timeout: None }
+    }
+}
+
+/// Let Typst compiles (equations) started inside `f` stop when the script is interrupted.
+fn with_math_interrupt<R>(interrupts: &Arc<Interrupts>, f: impl FnOnce() -> R) -> R {
+    #[cfg(feature = "math")]
+    {
+        let i = interrupts.clone();
+        crate::math::with_interrupt(move || i.fired(), f)
+    }
+    #[cfg(not(feature = "math"))]
+    {
+        let _ = interrupts;
+        f()
+    }
+}
+
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Everything that can stop a script: its own cancel flag and deadline, plus those the
+/// host put on the [`Config`] it passed to `run`. Any of them stops it.
+struct Interrupts {
+    cancel: Arc<AtomicBool>,
+    deadline: crate::config::Deadline,
+    host: Mutex<(Option<Arc<AtomicBool>>, Option<crate::config::Deadline>)>,
+}
+
+impl Interrupts {
+    fn fired(&self) -> bool {
+        if self.cancel.load(Ordering::Relaxed) || lock(&self.deadline).is_some_and(|t| Instant::now() > t) {
+            return true;
+        }
+        let host = lock(&self.host);
+        host.0.as_ref().is_some_and(|c| c.load(Ordering::Relaxed))
+            || host.1.as_ref().is_some_and(|d| lock(d).is_some_and(|t| Instant::now() > t))
+    }
 }
 
 type Maps = Rc<RefCell<HashMap<String, Transpiled>>>;
@@ -238,8 +289,7 @@ pub struct ScriptHost {
     /// (scene name, export key)
     scenes: Vec<(String, String)>,
     maps: Maps,
-    cancel: Arc<AtomicBool>,
-    deadline: crate::config::Deadline,
+    interrupts: Arc<Interrupts>,
     options: HostOptions,
     /// This script's scene, handle table and paths (swapped in for every call).
     state: RefCell<native::State>,
@@ -264,13 +314,14 @@ impl ScriptHost {
             runtime.set_memory_limit(limit);
         }
         runtime.set_max_stack_size(512 * 1024);
-        let cancel = Arc::new(AtomicBool::new(false));
-        let deadline: crate::config::Deadline = Default::default();
+        let interrupts = Arc::new(Interrupts {
+            cancel: Arc::new(AtomicBool::new(false)),
+            deadline: Default::default(),
+            host: Mutex::new((None, None)),
+        });
         {
-            let (c, d) = (cancel.clone(), deadline.clone());
-            runtime.set_interrupt_handler(Some(Box::new(move || {
-                c.load(Ordering::Relaxed) || d.lock().unwrap().is_some_and(|t| Instant::now() > t)
-            })));
+            let i = interrupts.clone();
+            runtime.set_interrupt_handler(Some(Box::new(move || i.fired())));
         }
         let import_error: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
         runtime.set_loader(
@@ -286,65 +337,66 @@ impl ScriptHost {
             st.sandbox = options.sandbox.clone();
         }
 
-        let host_deadline = deadline.clone();
         if let Some(t) = options.timeout {
-            *host_deadline.lock().unwrap() = Some(Instant::now() + t);
+            *lock(&interrupts.deadline) = Some(Instant::now() + t);
         }
-        let loaded = native::with_host_state(&state, || {
-            context.with(|ctx| -> Result<_> {
-                native::install(&ctx).map_err(|e| anyhow!("installing natives: {e}"))?;
-                let module =
-                    Module::declare(ctx.clone(), name.clone(), code).catch(&ctx).map_err(|e| caught(e, &maps))?;
-                let (module, promise) = module.eval().catch(&ctx).map_err(|e| caught(e, &maps))?;
-                promise.finish::<()>().catch(&ctx).map_err(|e| caught(e, &maps))?;
-                // A failed import can leave the exception pending without rejecting the promise.
-                let pending = ctx.catch();
-                if !matches!(
-                    pending.type_of(),
-                    rquickjs::Type::Uninitialized | rquickjs::Type::Undefined | rquickjs::Type::Null
-                ) {
-                    let err = match pending.as_exception() {
-                        Some(e) => CaughtError::Exception(e.clone()),
-                        None => CaughtError::Value(pending),
-                    };
-                    return Err(caught(err, &maps));
-                }
-                let ns = module.namespace()?;
-                let is_scene: Option<Function> = ctx.globals().get("__manim_isScene")?;
-                let Some(is_scene) = is_scene else {
-                    bail!("{} does not import from \"manim\"", name);
-                };
-                let mut scenes = Vec::new();
-                for key in ns.keys::<String>() {
-                    let key = key?;
-                    let v: Value = ns.get(&key)?;
-                    if is_scene.call::<_, bool>((v.clone(),))? {
-                        let f: Function = v.get()?;
-                        let fname: String = f.get::<_, Option<String>>("name")?.unwrap_or_default();
-                        let scene_name = if key == "default" && !fname.is_empty() { fname } else { key.clone() };
-                        scenes.push((scene_name, key));
+        let loaded = with_math_interrupt(&interrupts, || {
+            native::with_host_state(&state, || {
+                context.with(|ctx| -> Result<_> {
+                    native::install(&ctx).map_err(|e| anyhow!("installing natives: {e}"))?;
+                    let module =
+                        Module::declare(ctx.clone(), name.clone(), code).catch(&ctx).map_err(|e| caught(e, &maps))?;
+                    let (module, promise) = module.eval().catch(&ctx).map_err(|e| caught(e, &maps))?;
+                    promise.finish::<()>().catch(&ctx).map_err(|e| caught(e, &maps))?;
+                    // A failed import can leave the exception pending without rejecting the promise.
+                    let pending = ctx.catch();
+                    if !matches!(
+                        pending.type_of(),
+                        rquickjs::Type::Uninitialized | rquickjs::Type::Undefined | rquickjs::Type::Null
+                    ) {
+                        let err = match pending.as_exception() {
+                            Some(e) => CaughtError::Exception(e.clone()),
+                            None => CaughtError::Value(pending),
+                        };
+                        return Err(caught(err, &maps));
                     }
-                }
-                // Namespace keys come sorted; list scenes in source order instead.
-                let pos = |key: &str, name: &str| -> usize {
-                    let pats = if key == "default" {
-                        vec!["export default".to_string()]
-                    } else {
-                        vec![
-                            format!("class {key}"),
-                            format!("const {key}"),
-                            format!("let {key}"),
-                            format!("function {key}"),
-                        ]
+                    let ns = module.namespace()?;
+                    let is_scene: Option<Function> = ctx.globals().get("__manim_isScene")?;
+                    let Some(is_scene) = is_scene else {
+                        bail!("{} does not import from \"manim\"", name);
                     };
-                    pats.iter()
-                        .chain([&format!("class {name}")])
-                        .filter_map(|p| source.find(p.as_str()))
-                        .min()
-                        .unwrap_or(usize::MAX)
-                };
-                scenes.sort_by_key(|(name, key)| pos(key, name));
-                Ok((scenes, Persistent::save(&ctx, ns)))
+                    let mut scenes = Vec::new();
+                    for key in ns.keys::<String>() {
+                        let key = key?;
+                        let v: Value = ns.get(&key)?;
+                        if is_scene.call::<_, bool>((v.clone(),))? {
+                            let f: Function = v.get()?;
+                            let fname: String = f.get::<_, Option<String>>("name")?.unwrap_or_default();
+                            let scene_name = if key == "default" && !fname.is_empty() { fname } else { key.clone() };
+                            scenes.push((scene_name, key));
+                        }
+                    }
+                    // Namespace keys come sorted; list scenes in source order instead.
+                    let pos = |key: &str, name: &str| -> usize {
+                        let pats = if key == "default" {
+                            vec!["export default".to_string()]
+                        } else {
+                            vec![
+                                format!("class {key}"),
+                                format!("const {key}"),
+                                format!("let {key}"),
+                                format!("function {key}"),
+                            ]
+                        };
+                        pats.iter()
+                            .chain([&format!("class {name}")])
+                            .filter_map(|p| source.find(p.as_str()))
+                            .min()
+                            .unwrap_or(usize::MAX)
+                    };
+                    scenes.sort_by_key(|(name, key)| pos(key, name));
+                    Ok((scenes, Persistent::save(&ctx, ns)))
+                })
             })
         });
         let (scenes, namespace) = match (loaded, import_error.borrow_mut().take()) {
@@ -352,7 +404,7 @@ impl ScriptHost {
             (Err(_), Some(import)) => bail!("{}: {import}", path.display()),
             (Err(e), None) => return Err(e),
         };
-        *host_deadline.lock().unwrap() = None;
+        *lock(&interrupts.deadline) = None;
         if scenes.is_empty() {
             bail!(
                 "{} exports no scenes (export a class extending Scene, or scene(\"Name\", s => ...))",
@@ -367,27 +419,27 @@ impl ScriptHost {
             path,
             scenes,
             maps,
-            cancel,
-            deadline,
+            interrupts,
             options,
             state,
             initial_handles,
         })
     }
 
-    /// Run `f` with this script's state active and its deadline armed. A new call also
-    /// clears a cancel left over from an earlier one.
+    /// Run `f` with this script's state active and its deadline armed. A cancel that stopped
+    /// the call is consumed here (the next call starts clean); one set before the call
+    /// stops it immediately.
     fn enter<R>(&self, f: impl FnOnce() -> Result<R>) -> Result<R> {
-        self.cancel.store(false, Ordering::Relaxed);
-        *self.deadline.lock().unwrap() = self.options.timeout.map(|t| Instant::now() + t);
-        let r = native::with_host_state(&self.state, f);
-        *self.deadline.lock().unwrap() = None;
+        *lock(&self.interrupts.deadline) = self.options.timeout.map(|t| Instant::now() + t);
+        let r = with_math_interrupt(&self.interrupts, || native::with_host_state(&self.state, f));
+        *lock(&self.interrupts.deadline) = None;
         match r {
-            Err(_) if self.cancel.load(Ordering::Relaxed) => Err(anyhow!(CANCELLED)),
+            Err(_) if self.interrupts.cancel.swap(false, Ordering::Relaxed) => Err(anyhow!(CANCELLED)),
             r => r,
         }
     }
 
+    /// Path of the script this host loaded.
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -399,7 +451,7 @@ impl ScriptHost {
 
     /// Set from any thread to stop a running script.
     pub fn cancel_handle(&self) -> Arc<AtomicBool> {
-        self.cancel.clone()
+        self.interrupts.cancel.clone()
     }
 
     /// Expose JSON data to scripts as `globalThis[name]` (e.g. measured narration lengths).
@@ -431,8 +483,10 @@ impl ScriptHost {
     pub fn run(&self, scene: &str, config: &Config) -> Result<()> {
         let key = self.key_for(scene)?;
         let mut config = config.clone();
-        config.cancel = Some(self.cancel.clone());
-        config.deadline = Some(self.deadline.clone());
+        // The host's own `cancel` / `deadline` stay in force; this script's join them.
+        *lock(&self.interrupts.host) = (config.cancel.clone(), config.deadline.clone());
+        config.script_cancel = Some(self.interrupts.cancel.clone());
+        config.script_deadline = Some(self.interrupts.deadline.clone());
         // Drop the previous scene (and its video writer) before starting the next.
         self.state.borrow_mut().scene = None;
         let result = self.enter(|| {
@@ -459,8 +513,12 @@ impl ScriptHost {
     pub fn finish(&self) -> Result<()> {
         let mut s = self.state.borrow_mut().scene.take().ok_or_else(|| anyhow!("no scene has run"))?;
         let started = s.created_at();
-        let r = s.finish(started);
+        let r = with_math_interrupt(&self.interrupts, || s.finish(started));
         self.state.borrow_mut().scene = Some(s);
+        if r.is_err() {
+            // A cancel that stopped the render is spent; don't cancel the next one too.
+            self.interrupts.cancel.store(false, Ordering::Relaxed);
+        }
         r
     }
 
@@ -474,7 +532,8 @@ impl ScriptHost {
         r
     }
 
-    /// Jump the loaded scene to time `t` (it must have run with `Config::record`).
+    /// Jump the loaded scene to time `t` (it must have run with `Config::record`): the state
+    /// shown is exported frame `floor(t * fps)`.
     /// Script updaters run again for the frames replayed.
     pub fn seek(&self, t: f64) -> Result<()> {
         self.enter(|| {
@@ -491,6 +550,7 @@ impl ScriptHost {
         self.with_scene(|s| s.render_frame()).ok_or_else(|| anyhow!("no scene has run"))
     }
 
+    /// Plays, markers and sounds of the scene that last ran, or `None` before the first run.
     pub fn timeline(&self) -> Option<TimelineInfo> {
         self.with_scene(|s| s.timeline())
     }

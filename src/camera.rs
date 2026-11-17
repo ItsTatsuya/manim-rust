@@ -11,17 +11,24 @@ use crate::world::World;
 /// Matches Cairo Manim: 1 stroke-width unit = 0.01 scene units.
 const STROKE_WIDTH_UNIT: f64 = 0.01;
 
+/// Maps scene coordinates to pixels and turns a [`World`] into a [`DisplayList`].
 #[derive(Clone, Debug)]
 pub struct Camera {
+    /// Output width in pixels.
     pub pixel_width: u32,
+    /// Output height in pixels.
     pub pixel_height: u32,
+    /// Height of the visible area in scene units; the width follows from the pixel aspect ratio.
     pub frame_height: f64,
+    /// Scene point shown at the center of the frame.
     pub frame_center: Point,
+    /// Frame background; its alpha is ignored (frames are always opaque).
     pub background: Color,
     layer_cache: Arc<Mutex<Option<Layer>>>,
 }
 
 impl Camera {
+    /// A camera with the default frame (height 8 units, centered on the origin) and a black background.
     pub fn new(pixel_width: u32, pixel_height: u32) -> Self {
         Camera {
             pixel_width,
@@ -33,16 +40,19 @@ impl Camera {
         }
     }
 
+    /// Width of the visible area in scene units.
     pub fn frame_width(&self) -> f64 {
         self.frame_height * self.pixel_width as f64 / self.pixel_height as f64
     }
 
+    /// Pixel position (x right, y down, origin top-left) of a scene point.
     pub fn to_pixel(&self, p: Point) -> [f32; 2] {
         let (w, h) = (self.pixel_width as f64, self.pixel_height as f64);
         let d = p - self.frame_center;
         [((d.x / self.frame_width() + 0.5) * w) as f32, ((0.5 - d.y / self.frame_height) * h) as f32]
     }
 
+    /// Build the display list for the current state of `world`: displayed mobjects sorted by z-index, then the overlay. The background layer is reused between frames when unchanged.
     pub fn display_list(&self, world: &World) -> DisplayList {
         let mut ids: Vec<_> = world.displayed().to_vec();
         ids.sort_by_key(|id| world[*id].z_index); // stable: keeps add order within a z level
@@ -59,12 +69,12 @@ impl Camera {
             }
             // Reuse the previous frame's Arc when nothing changed, so renderers can
             // cache the rasterized layer and frame dedup compares pointers.
-            let mut cache = self.layer_cache.lock().unwrap();
-            match &*cache {
-                Some(prev) if *prev.0 == layer => Some(prev.clone()),
+            let prev = self.layer_cache.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            match prev {
+                Some(prev) if *prev.0 == layer => Some(prev),
                 _ => {
                     let l = Layer(Arc::new(layer));
-                    *cache = Some(l.clone());
+                    *self.layer_cache.lock().unwrap_or_else(|e| e.into_inner()) = Some(l.clone());
                     Some(l)
                 }
             }
@@ -72,7 +82,14 @@ impl Camera {
         DisplayList {
             width: self.pixel_width,
             height: self.pixel_height,
-            background: self.background.to_array(1.0),
+            // The frame is always opaque (premultiplied and straight pixels coincide, and the
+            // PNG / video writers expect that): a translucent background color is made solid.
+            background: {
+                let b = self.background;
+                let mut rgba = Color::rgb(b.r, b.g, b.b).to_array(1.0);
+                rgba[3] = 1.0;
+                rgba
+            },
             background_layer,
             items,
         }
@@ -80,7 +97,7 @@ impl Camera {
 
     fn push_items(&self, mob: &VMobject, items: &mut Vec<DrawPath>) {
         let px_per_unit = self.pixel_width as f64 / self.frame_width();
-        for m in mob.family() {
+        for m in mob.family_iter() {
             if let (Some(image), Some([ul, ur, dl])) = (&m.meta.image, m.meta.anchors) {
                 let opacity = m.fill_opacity as f32;
                 if opacity <= 0.0 {

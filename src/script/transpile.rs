@@ -13,7 +13,9 @@ use oxc::transformer::{TransformOptions, Transformer};
 
 /// Generated JS plus, for each generated line (0-based), the original line (0-based).
 pub struct Transpiled {
+    /// The generated JavaScript.
     pub code: String,
+    /// `lines[i]` is the original (0-based) line of generated line `i`.
     pub lines: Vec<u32>,
 }
 

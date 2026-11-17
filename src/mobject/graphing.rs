@@ -11,10 +11,12 @@ use crate::constants::*;
 /// Smooth curve through `f(t)` sampled over `t_range`. Non-finite samples break the curve.
 pub struct ParametricFunction;
 impl ParametricFunction {
+    /// Curve through `f(t)` sampled 200 times over `t_range`.
     pub fn new(f: impl Fn(f64) -> Point, t_range: [f64; 2]) -> VMobject {
         Self::with_samples(f, t_range, 200)
     }
 
+    /// Like [`ParametricFunction::new`] with an explicit number of samples (at least 2).
     pub fn with_samples(f: impl Fn(f64) -> Point, t_range: [f64; 2], samples: usize) -> VMobject {
         let n = samples.max(2);
         let mut subpaths = Vec::new();
@@ -41,6 +43,7 @@ impl ParametricFunction {
 /// `y = f(x)` in scene coordinates.
 pub struct FunctionGraph;
 impl FunctionGraph {
+    /// Graph of `f` over `x_range`.
     pub fn new(f: impl Fn(f64) -> f64, x_range: [f64; 2]) -> VMobject {
         ParametricFunction::new(|x| pt(x, f(x)), x_range)
     }
@@ -51,17 +54,26 @@ impl FunctionGraph {
 pub struct Axes {
     /// `[min, max, step]`
     pub x_range: [f64; 3],
+    /// `[min, max, step]` of the y axis.
     pub y_range: [f64; 3],
+    /// Length of the x axis in scene units.
     pub x_length: f64,
+    /// Length of the y axis in scene units.
     pub y_length: f64,
+    /// Scene point at the middle of the axes.
     pub center: Point,
+    /// Color of axes and ticks.
     pub color: Color,
+    /// Draw arrow tips on the axes.
     pub include_tips: bool,
+    /// Label ticks with numbers (`text` feature).
     pub include_numbers: bool,
+    /// Half-length of tick marks in scene units.
     pub tick_size: f64,
 }
 
 impl Axes {
+    /// Axes with `[min, max, step]` ranges for x and y, sized to fit the default frame.
     pub fn new(x_range: [f64; 3], y_range: [f64; 3]) -> Self {
         Axes {
             x_range,
@@ -76,22 +88,27 @@ impl Axes {
         }
     }
 
+    /// Set the x axis length in scene units.
     pub fn x_length(mut self, l: f64) -> Self {
         self.x_length = l;
         self
     }
+    /// Set the y axis length in scene units.
     pub fn y_length(mut self, l: f64) -> Self {
         self.y_length = l;
         self
     }
+    /// Center the axes on `p`.
     pub fn move_to(mut self, p: Point) -> Self {
         self.center = p;
         self
     }
+    /// Set the axes color.
     pub fn color(mut self, c: Color) -> Self {
         self.color = c;
         self
     }
+    /// Draw or omit the arrow tips.
     pub fn tips(mut self, on: bool) -> Self {
         self.include_tips = on;
         self
@@ -125,10 +142,12 @@ impl Axes {
         self.plot_range(f, [self.x_range[0], self.x_range[1]])
     }
 
+    /// Plot `y = f(x)` over `x_range`.
     pub fn plot_range(&self, f: impl Fn(f64) -> f64, x_range: [f64; 2]) -> VMobject {
         ParametricFunction::new(|x| self.c2p(x, f(x)), x_range)
     }
 
+    /// Plot the parametric curve `(x(t), y(t))` in graph coordinates over `t_range`.
     pub fn plot_parametric(&self, f: impl Fn(f64) -> (f64, f64), t_range: [f64; 2]) -> VMobject {
         ParametricFunction::new(
             |t| {
@@ -162,9 +181,13 @@ impl Axes {
         g
     }
 
+    /// Build the axes, ticks and (if enabled) number labels as one mobject.
     pub fn to_mobject(&self) -> VMobject {
-        let y0 = 0.0_f64.clamp(self.y_range[0], self.y_range[1]);
-        let x0 = 0.0_f64.clamp(self.x_range[0], self.x_range[1]);
+        // Where the other axis crosses: zero, or the nearest end of the range. (Not `clamp`,
+        // which panics when a range is descending or NaN.)
+        let within = |r: [f64; 3]| 0.0_f64.max(r[0].min(r[1])).min(r[0].max(r[1]));
+        let y0 = within(self.y_range);
+        let x0 = within(self.x_range);
         let mut x_axis = self.axis(self.c2p(self.x_range[0], y0), self.c2p(self.x_range[1], y0));
         let mut y_axis = self.axis(self.c2p(x0, self.y_range[0]), self.c2p(x0, self.y_range[1]));
         let t = self.tick_size;
@@ -218,10 +241,12 @@ impl From<Axes> for VMobject {
 /// Background grid with axes (Manim's `NumberPlane`).
 pub struct NumberPlane;
 impl NumberPlane {
+    /// A grid of the default frame size with unit spacing.
     pub fn new() -> VMobject {
         Self::with_ranges([-FRAME_X_RADIUS, FRAME_X_RADIUS, 1.0], [-FRAME_Y_RADIUS, FRAME_Y_RADIUS, 1.0])
     }
 
+    /// A grid covering the given `[min, max, step]` ranges.
     pub fn with_ranges(x_range: [f64; 3], y_range: [f64; 3]) -> VMobject {
         let mut lines = Vec::new();
         let grid = grid_values;

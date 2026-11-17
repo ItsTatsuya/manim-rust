@@ -2,6 +2,21 @@
 // Mobjects are handles into the Rust engine; animations are plain specs played by it.
 const N = globalThis.__manim_native;
 
+// Every mobject is a handle into the engine's table. When its JS object is garbage
+// collected the handle goes back to the engine (temporaries like `alwaysRedraw`'s
+// rebuilt mobject would otherwise pile up). The epoch tells the engine which run a
+// handle belongs to, so a late release never frees another run's object.
+const FREE = typeof FinalizationRegistry === "function" ? new FinalizationRegistry((r) => N.release(r[0], r[1])) : null;
+let EPOCH = N.epoch(), ALLOCS = 0;
+function own(m) {
+  if (FREE) {
+    FREE.register(m, [m._h, EPOCH]);
+    // QuickJS queues finalizers as jobs; run them now and then, also in scripts that never play.
+    if ((++ALLOCS & 255) === 0) N.collect();
+  }
+  return m;
+}
+
 // ------------------------------------------------------------------ vectors
 
 /** A 3D vector with arithmetic helpers. Plain `[x, y]` / `[x, y, z]` arrays work anywhere too. */
@@ -144,7 +159,7 @@ function opts(o) {
 
 /** Base class of everything drawn. Methods mutate the mobject and return it (chainable). */
 export class Mobject {
-  constructor(h) { this._h = h; }
+  constructor(h) { this._h = h; own(this); }
   _op(name, ...args) { N.op(this._h, name, js(args)); return this; }
   _q(name, ...args) { return JSON.parse(N.op(this._h, name, js(args))); }
   // geometry
@@ -236,7 +251,9 @@ export class Mobject {
   clearUpdaters() { currentScene()._removeUpdater(this, null); return this; }
 }
 
-function wrap(h, proto) { const m = Object.create(proto ?? Mobject.prototype); m._h = h; return m; }
+function wrap(h, proto) { const m = Object.create(proto ?? Mobject.prototype); m._h = h; return own(m); }
+// A wrapper for a handle that other wrappers may share (scene mobjects): never released.
+function wrapShared(h) { const m = Object.create(Mobject.prototype); m._h = h; return m; }
 
 /** Text helpers shared by Text, MarkupText, MathTex... */
 class TextMobject extends Mobject {
@@ -255,6 +272,7 @@ function defineMobject(name, Base, build, init) {
   const C = function (...args) {
     const m = Object.create(C.prototype);
     m._h = build(...args);
+    own(m);
     if (init) init(m, ...args);
     return m;
   };
@@ -676,7 +694,7 @@ export class Scene {
   /** Draw above everything (watermarks, captions); kept by clear(). */
   addOverlay(...mobs) { for (const m of mobs.flat()) N.layer(m._h, "overlay"); return this; }
   /** Mobjects currently in the scene, in draw order. */
-  get mobjects() { return JSON.parse(N.mobjects()).map((h) => wrap(h, Mobject.prototype)); }
+  get mobjects() { return JSON.parse(N.mobjects()).map((h) => wrapShared(h)); }
   isOnScreen(m) { return N.isShown(m._h); }
   /** Scene time in seconds. */
   get time() { return N.time(); }
@@ -724,6 +742,7 @@ export class Scene {
       if (dt < 0) break;
       this._tick(dt, updaters);
       N.endFrame(pid, dt);
+      N.collect(); // give back the handles of this frame's temporaries
     }
   }
 }
@@ -764,6 +783,7 @@ for (const name of Object.getOwnPropertyNames(Mobject.prototype)) {
 
 // Host hooks.
 globalThis.__manim_run = (SceneClass) => {
+  EPOCH = N.epoch();
   const s = new SceneClass();
   CURRENT = s;
   try { s.construct(); } finally { /* keep CURRENT for seeking */ }

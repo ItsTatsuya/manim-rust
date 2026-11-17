@@ -30,6 +30,7 @@ pub struct Create {
 }
 
 impl Create {
+    /// Draw the mobject's outline progressively (Manim's `Create`).
     pub fn new(id: MobjectId) -> Self {
         Create {
             id,
@@ -51,6 +52,7 @@ impl Create {
 /// Reverse of `Create`; removes the mobject at the end.
 pub struct Uncreate;
 impl Uncreate {
+    /// Run `Create` backwards, then remove the mobject.
     #[allow(clippy::new_ret_no_self)]
     pub fn new(id: MobjectId) -> Create {
         Create { reverse: true, remover: true, ..Create::new(id) }
@@ -101,6 +103,7 @@ pub struct DrawBorderThenFill {
 }
 
 impl DrawBorderThenFill {
+    /// Draw the outline, then fade the fill in.
     pub fn new(id: MobjectId) -> Self {
         DrawBorderThenFill {
             id,
@@ -135,6 +138,7 @@ impl DrawBorderThenFill {
 /// lag is spread inside the run time: a play lasts exactly its `runTime`.
 pub struct Write;
 impl Write {
+    /// Handwriting-style reveal of text or shapes; run time scales with the number of glyphs.
     #[allow(clippy::new_ret_no_self)]
     pub fn new(id: MobjectId) -> DrawBorderThenFill {
         DrawBorderThenFill {
@@ -148,6 +152,7 @@ impl Write {
 /// `Write` backwards, erasing from the last glyph; removes the mobject at the end.
 pub struct Unwrite;
 impl Unwrite {
+    /// Erase with [`Write`] reversed, then remove the mobject.
     #[allow(clippy::new_ret_no_self)]
     pub fn new(id: MobjectId) -> DrawBorderThenFill {
         DrawBorderThenFill { name: "Unwrite", reverse: true, remover: true, ..Write::new(id) }
@@ -160,13 +165,16 @@ impl Animation for DrawBorderThenFill {
         self.name.into()
     }
     fn resolve(&mut self, w: &World) {
-        let n = w[self.id].leaves().len().max(1) as f64;
+        let n = w.try_get(self.id).map_or(1, |m| m.leaves().len().max(1)) as f64;
         if self.cfg.run_time < 0.0 {
             self.cfg.run_time = if n < 15.0 { 1.0 } else { 2.0 };
         }
         if self.cfg.lag_ratio < 0.0 {
             self.cfg.lag_ratio = (4.0 / n).min(0.2);
         }
+    }
+    fn validate(&self, w: &World) -> anyhow::Result<()> {
+        w.try_get(self.id).map(|_| ())
     }
     fn begin(&mut self, w: &mut World) {
         self.resolve(w);
@@ -282,6 +290,7 @@ impl ShowLetters {
     }
 }
 
+/// Namespace for the letter-by-letter reveal of text; the constructor returns a `ShowLetters` animation.
 pub struct AddTextLetterByLetter;
 impl AddTextLetterByLetter {
     /// Reveal the letters one at a time (0.1 s per letter unless a run time is set).
@@ -291,6 +300,7 @@ impl AddTextLetterByLetter {
     }
 }
 
+/// Namespace for the letter-by-letter removal of text, last letter first.
 pub struct RemoveTextLetterByLetter;
 impl RemoveTextLetterByLetter {
     /// Remove the letters one at a time, last first; removes the mobject at the end.
@@ -300,6 +310,7 @@ impl RemoveTextLetterByLetter {
     }
 }
 
+/// Namespace for typing text with a cursor mobject following the last letter.
 pub struct TypeWithCursor;
 impl TypeWithCursor {
     /// Type the text letter by letter with `cursor` following the last letter.
@@ -309,6 +320,7 @@ impl TypeWithCursor {
     }
 }
 
+/// Namespace for deleting text with a cursor mobject following, last letter first.
 pub struct UntypeWithCursor;
 impl UntypeWithCursor {
     /// Delete the text letter by letter, last first, with `cursor` following.
@@ -325,8 +337,11 @@ impl Animation for ShowLetters {
     }
     fn resolve(&mut self, w: &World) {
         if self.cfg.run_time < 0.0 {
-            self.cfg.run_time = self.time_per_char * w[self.id].leaves().len().max(1) as f64;
+            self.cfg.run_time = self.time_per_char * w.try_get(self.id).map_or(1, |m| m.leaves().len().max(1)) as f64;
         }
+    }
+    fn validate(&self, w: &World) -> anyhow::Result<()> {
+        w.try_get(self.id).map(|_| ())
     }
     fn begin(&mut self, w: &mut World) {
         self.resolve(w);
@@ -378,6 +393,7 @@ pub struct ShowPassingFlash {
 }
 
 impl ShowPassingFlash {
+    /// Flash along the outline of mobject `id`.
     pub fn new(id: MobjectId) -> Self {
         ShowPassingFlash {
             id,
@@ -387,6 +403,7 @@ impl ShowPassingFlash {
             leaves: Vec::new(),
         }
     }
+    /// Fraction of the outline (default 0.1) visible at once.
     pub fn time_width(mut self, w: f64) -> Self {
         self.time_width = w;
         self

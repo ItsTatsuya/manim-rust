@@ -53,14 +53,61 @@ type FaceData = Arc<dyn AsRef<[u8]> + Send + Sync>;
 type GlyphKey = (fontdb::ID, u16, u16);
 
 struct Fonts {
-    db: RwLock<fontdb::Database>,
+    /// The one font database of the crate: SVG `<text>` parses with it too (it is the same
+    /// `fontdb` as `usvg`'s), so system fonts are scanned once. Shared by `Arc` so a
+    /// snapshot can be handed to usvg; registering fonts copies it only if one is out.
+    db: RwLock<Arc<fontdb::Database>>,
+    /// Fallback chains by style, valid for one generation of the database (see [`Chains`]).
+    chains: Mutex<Chains>,
     /// Face bytes kept alive (memory-mapped or owned) so several faces can be parsed at once.
     data: Mutex<HashMap<fontdb::ID, (FaceData, u32)>>,
     /// Glyph outlines in em units, keyed by face, glyph and weight.
     outlines: Mutex<HashMap<GlyphKey, Arc<Vec<Subpath>>>>,
     /// Which face covers a character no font in the chain had.
     rescue: Mutex<HashMap<char, Option<fontdb::ID>>>,
+    /// Parsed faces ready to shape with, by face and requested weight.
+    shapers: Mutex<HashMap<ShaperKey, Option<Arc<Shaper>>>>,
 }
+
+type ShaperKey = (fontdb::ID, u16);
+
+/// A face parsed once for shaping. Font data is never freed once loaded (the cache above
+/// keeps it for the life of the process), so the borrow is `'static`.
+struct Shaper {
+    hb: rustybuzz::Face<'static>,
+    /// The `wght` actually applied (0 for a static font).
+    weight_key: u16,
+    units_per_em: f64,
+}
+
+fn shaper(id: fontdb::ID, weight: u16) -> Option<Arc<Shaper>> {
+    let f = fonts();
+    if let Some(s) = f.shapers.lock().unwrap_or_else(|e| e.into_inner()).get(&(id, weight)) {
+        return s.clone();
+    }
+    let built = (|| {
+        let (data, index) = face_data(id)?;
+        // One small allocation kept per face for the rest of the process, like the data itself.
+        let leaked: &'static FaceData = Box::leak(Box::new(data));
+        let bytes: &'static [u8] = (**leaked).as_ref();
+        let mut tface = ttf_parser::Face::parse(bytes, index).ok()?;
+        let weight_key = apply_weight(&mut tface, weight);
+        let units_per_em = tface.units_per_em() as f64;
+        Some(Arc::new(Shaper { hb: rustybuzz::Face::from_face(tface), weight_key, units_per_em }))
+    })();
+    f.shapers.lock().unwrap_or_else(|e| e.into_inner()).insert((id, weight), built.clone());
+    built
+}
+
+/// Resolved font chains. `generation` changes whenever fonts are registered, so a chain
+/// computed against the old database is never stored after the change.
+#[derive(Default)]
+struct Chains {
+    generation: u64,
+    map: HashMap<ChainKey, Arc<Resolved>>,
+}
+
+type ChainKey = (String, u16, bool, Vec<String>);
 
 fn fonts() -> &'static Fonts {
     static FONTS: OnceLock<Fonts> = OnceLock::new();
@@ -68,10 +115,12 @@ fn fonts() -> &'static Fonts {
         let mut db = fontdb::Database::new();
         db.load_system_fonts();
         Fonts {
-            db: RwLock::new(db),
+            db: RwLock::new(Arc::new(db)),
+            chains: Mutex::new(Chains::default()),
             data: Mutex::new(HashMap::new()),
             outlines: Mutex::new(HashMap::new()),
             rescue: Mutex::new(HashMap::new()),
+            shapers: Mutex::new(HashMap::new()),
         }
     })
 }
@@ -79,6 +128,21 @@ fn fonts() -> &'static Fonts {
 /// Load the system font database ahead of first use (called on a background thread).
 pub fn preload_fonts() {
     fonts();
+}
+
+/// A snapshot of the font database (system fonts plus registered ones), for SVG text.
+#[cfg(feature = "svg")]
+pub(crate) fn shared_fontdb() -> Arc<fontdb::Database> {
+    fonts().db.read().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// Forget everything derived from the font database; called after fonts are registered.
+fn invalidate_font_caches(f: &Fonts) {
+    let mut chains = f.chains.lock().unwrap_or_else(|e| e.into_inner());
+    chains.generation += 1;
+    chains.map.clear();
+    drop(chains);
+    f.rescue.lock().unwrap_or_else(|e| e.into_inner()).clear();
 }
 
 /// Make a font file (`.ttf`, `.otf`, `.ttc`) usable by family name. Returns the families it adds.
@@ -95,25 +159,21 @@ pub fn register_font_dir(path: impl AsRef<Path>) -> Result<usize> {
         bail!("font folder {} does not exist", path.display());
     }
     let f = fonts();
-    let mut db = f.db.write().unwrap();
+    let mut db = f.db.write().unwrap_or_else(|e| e.into_inner());
     let before = db.len();
-    db.load_fonts_dir(path);
+    Arc::make_mut(&mut *db).load_fonts_dir(path);
     let added = db.len() - before;
     drop(db);
-    f.rescue.lock().unwrap().clear();
-    #[cfg(feature = "svg")]
-    crate::svg::register_font_dir(path);
+    invalidate_font_caches(f);
     Ok(added)
 }
 
 /// Register font bytes. Returns the families they add.
 pub fn register_font_data(bytes: Vec<u8>) -> Result<Vec<String>> {
     let f = fonts();
-    #[cfg(feature = "svg")]
-    let svg_copy = bytes.clone();
-    let mut db = f.db.write().unwrap();
+    let mut db = f.db.write().unwrap_or_else(|e| e.into_inner());
     let before: Vec<fontdb::ID> = db.faces().map(|i| i.id).collect();
-    db.load_font_data(bytes);
+    Arc::make_mut(&mut *db).load_font_data(bytes);
     let mut families: Vec<String> =
         db.faces().filter(|i| !before.contains(&i.id)).flat_map(|i| i.families.first().map(|f| f.0.clone())).collect();
     drop(db);
@@ -121,23 +181,23 @@ pub fn register_font_data(bytes: Vec<u8>) -> Result<Vec<String>> {
         bail!("no font faces found in the data");
     }
     families.dedup();
-    f.rescue.lock().unwrap().clear();
-    #[cfg(feature = "svg")]
-    crate::svg::register_font_data(svg_copy);
+    invalidate_font_caches(f);
     Ok(families)
 }
 
 /// Whether a font family is installed or registered.
 pub fn has_font(family: &str) -> bool {
-    let db = fonts().db.read().unwrap();
+    let db = fonts().db.read().unwrap_or_else(|e| e.into_inner());
     let found = db.faces().any(|i| i.families.iter().any(|f| f.0.eq_ignore_ascii_case(family)));
     found
 }
 
 /// Every known font family, sorted.
 pub fn font_families() -> Vec<String> {
-    let db = fonts().db.read().unwrap();
-    let mut v: Vec<String> = db.faces().flat_map(|i| i.families.iter().map(|f| f.0.clone())).collect();
+    let mut v: Vec<String> = {
+        let db = fonts().db.read().unwrap_or_else(|e| e.into_inner());
+        db.faces().flat_map(|i| i.families.iter().map(|f| f.0.clone())).collect()
+    };
     v.sort();
     v.dedup();
     v
@@ -145,18 +205,20 @@ pub fn font_families() -> Vec<String> {
 
 fn face_data(id: fontdb::ID) -> Option<(FaceData, u32)> {
     let f = fonts();
-    if let Some(d) = f.data.lock().unwrap().get(&id) {
+    if let Some(d) = f.data.lock().unwrap_or_else(|e| e.into_inner()).get(&id) {
         return Some(d.clone());
     }
     // SAFETY: fontdb memory-maps font files; a file changing on disk while mapped is the
     // documented hazard, the same one every font stack accepts.
-    let d = unsafe { f.db.write().unwrap().make_shared_face_data(id) }?;
-    f.data.lock().unwrap().insert(id, d.clone());
+    let mut w = f.db.write().unwrap_or_else(|e| e.into_inner());
+    let d = unsafe { Arc::make_mut(&mut *w).make_shared_face_data(id) }?;
+    drop(w);
+    f.data.lock().unwrap_or_else(|e| e.into_inner()).insert(id, d.clone());
     Some(d)
 }
 
 fn query(family: &str, weight: u16, italic: bool) -> Option<fontdb::ID> {
-    let db = fonts().db.read().unwrap();
+    let db = fonts().db.read().unwrap_or_else(|e| e.into_inner());
     let families = if family.is_empty() { vec![fontdb::Family::SansSerif] } else { vec![fontdb::Family::Name(family)] };
     let q = fontdb::Query {
         families: &families,
@@ -184,49 +246,65 @@ fn covers(id: fontdb::ID, ch: char) -> bool {
 /// Any face that has `ch` (slow scan, cached per character).
 fn rescue_face(ch: char) -> Option<fontdb::ID> {
     let f = fonts();
-    if let Some(r) = f.rescue.lock().unwrap().get(&ch) {
+    if let Some(r) = f.rescue.lock().unwrap_or_else(|e| e.into_inner()).get(&ch) {
         return *r;
     }
-    let ids: Vec<fontdb::ID> = f.db.read().unwrap().faces().map(|i| i.id).collect();
+    let ids: Vec<fontdb::ID> = f.db.read().unwrap_or_else(|e| e.into_inner()).faces().map(|i| i.id).collect();
     let found = ids.into_iter().find(|id| covers(*id, ch));
-    f.rescue.lock().unwrap().insert(ch, found);
+    f.rescue.lock().unwrap_or_else(|e| e.into_inner()).insert(ch, found);
     found
 }
 
 // ---------------------------------------------------------------------- styles
 
+/// Horizontal alignment of lines in a paragraph.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Align {
+    /// Flush left.
     #[default]
     Left,
+    /// Centered.
     Center,
+    /// Flush right.
     Right,
 }
 
+/// Font, size, weight, color and paragraph settings for [`Text`]. Starts from [`TextStyle::default`] and is adjusted with the builder methods.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TextStyle {
     /// Font family; empty means the theme's (or the system's) default.
     pub font: String,
+    /// Font size in points.
     pub font_size: f64,
     /// 100 (thin) … 400 (regular) … 700 (bold) … 900 (black).
     pub weight: u16,
+    /// Italic when true.
     pub italic: bool,
+    /// Fill color of the glyphs.
     pub color: Color,
     /// Line height as a multiple of the em size.
     pub line_spacing: f64,
     /// Wrap lines longer than this many scene units (at spaces).
     pub max_width: Option<f64>,
+    /// Horizontal alignment of lines.
     pub align: Align,
     /// Extra fonts tried for characters the main font lacks.
     pub fallback_fonts: Vec<String>,
 }
 
+/// Weight 100.
 pub const THIN: u16 = 100;
+/// Weight 300.
 pub const LIGHT: u16 = 300;
+/// Weight 400.
 pub const NORMAL: u16 = 400;
+/// Weight 500.
 pub const MEDIUM: u16 = 500;
+/// Weight 600.
 pub const SEMIBOLD: u16 = 600;
+/// Weight 700.
 pub const BOLD: u16 = 700;
+/// Weight 900.
 pub const HEAVY: u16 = 900;
 
 impl Default for TextStyle {
@@ -248,41 +326,51 @@ impl Default for TextStyle {
 }
 
 impl TextStyle {
+    /// Set the font family.
     pub fn font(mut self, f: &str) -> Self {
         self.font = f.to_string();
         self
     }
+    /// Set the font size in points.
     pub fn size(mut self, s: f64) -> Self {
         self.font_size = s;
         self
     }
+    /// Set the weight (clamped to 1 to 1000).
     pub fn weight(mut self, w: u16) -> Self {
         self.weight = w.clamp(1, 1000);
         self
     }
+    /// Bold (weight 700).
     pub fn bold(self) -> Self {
         self.weight(BOLD)
     }
+    /// Italic.
     pub fn italic(mut self) -> Self {
         self.italic = true;
         self
     }
+    /// Set the color.
     pub fn color(mut self, c: Color) -> Self {
         self.color = c;
         self
     }
+    /// Set the line spacing as a multiple of the em size.
     pub fn line_spacing(mut self, s: f64) -> Self {
         self.line_spacing = s;
         self
     }
+    /// Wrap lines longer than `w` scene units.
     pub fn max_width(mut self, w: f64) -> Self {
         self.max_width = Some(w);
         self
     }
+    /// Set the paragraph alignment.
     pub fn align(mut self, a: Align) -> Self {
         self.align = a;
         self
     }
+    /// Add a fallback font family for characters the main font lacks.
     pub fn fallback(mut self, family: &str) -> Self {
         self.fallback_fonts.push(family.to_string());
         self
@@ -292,11 +380,14 @@ impl TextStyle {
 /// A run of text with its own style (see [`Text::rich`]).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Span {
+    /// The text of the run.
     pub text: String,
+    /// Its style.
     pub style: TextStyle,
 }
 
 impl Span {
+    /// A run of `text` in `style`.
     pub fn new(text: &str, style: TextStyle) -> Self {
         Span { text: text.to_string(), style }
     }
@@ -363,10 +454,14 @@ fn apply_weight(face: &mut ttf_parser::Face, weight: u16) -> u16 {
     w as u16
 }
 
+fn cached_outline(key: GlyphKey) -> Option<Arc<Vec<Subpath>>> {
+    fonts().outlines.lock().unwrap_or_else(|e| e.into_inner()).get(&key).cloned()
+}
+
 fn outline(id: fontdb::ID, face: &ttf_parser::Face, gid: u16, weight_key: u16) -> Arc<Vec<Subpath>> {
     let key = (id, gid, weight_key);
-    if let Some(o) = fonts().outlines.lock().unwrap().get(&key) {
-        return o.clone();
+    if let Some(o) = cached_outline(key) {
+        return o;
     }
     let mut pen = GlyphPen {
         subpaths: Vec::new(),
@@ -378,7 +473,7 @@ fn outline(id: fontdb::ID, face: &ttf_parser::Face, gid: u16, weight_key: u16) -
     face.outline_glyph(ttf_parser::GlyphId(gid), &mut pen);
     pen.flush(false);
     let o = Arc::new(pen.subpaths);
-    fonts().outlines.lock().unwrap().insert(key, o.clone());
+    fonts().outlines.lock().unwrap_or_else(|e| e.into_inner()).insert(key, o.clone());
     o
 }
 
@@ -403,7 +498,33 @@ struct Resolved {
     chain: Vec<fontdb::ID>,
 }
 
-fn resolve_fonts(style: &TextStyle) -> Resolved {
+/// The font chain for a style, from a cache: building it takes ~26 database queries.
+fn resolve_fonts(style: &TextStyle) -> Arc<Resolved> {
+    let f = fonts();
+    let key: ChainKey = (style.font.clone(), style.weight, style.italic, style.fallback_fonts.clone());
+    let generation = {
+        let chains = f.chains.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(r) = chains.map.get(&key) {
+            return r.clone();
+        }
+        chains.generation
+    };
+    let resolved = Arc::new(resolve_fonts_uncached(style));
+    let mut chains = f.chains.lock().unwrap_or_else(|e| e.into_inner());
+    // Fonts registered meanwhile: this chain may be stale, so use it once but don't keep it.
+    if chains.generation == generation {
+        if chains.map.len() >= MAX_CACHED_CHAINS {
+            chains.map.clear();
+        }
+        chains.map.insert(key, resolved.clone());
+    }
+    resolved
+}
+
+/// Styles whose chains are cached (a scene uses a handful).
+const MAX_CACHED_CHAINS: usize = 256;
+
+fn resolve_fonts_uncached(style: &TextStyle) -> Resolved {
     let primary = query(&style.font, style.weight, style.italic)
         .or_else(|| query(&style.font, style.weight, false))
         .or_else(|| query("", style.weight, style.italic));
@@ -425,7 +546,7 @@ fn is_mark(c: char) -> bool {
 }
 
 /// Shape one line (no newlines) into positioned glyphs.
-fn shape_line(chars: &[(char, u32, usize)], spans: &[Span], resolved: &[Resolved]) -> Vec<Glyph> {
+fn shape_line(chars: &[(char, u32, usize)], spans: &[Span], resolved: &[Arc<Resolved>]) -> Vec<Glyph> {
     let mut out = Vec::new();
     // Pick a face per character.
     let mut faces: Vec<Option<fontdb::ID>> = Vec::with_capacity(chars.len());
@@ -457,22 +578,16 @@ fn shape_line(chars: &[(char, u32, usize)], spans: &[Span], resolved: &[Resolved
             i = j;
             continue;
         };
-        let Some((data, index)) = face_data(id) else {
+        let Some(shaper) = shaper(id, style.weight) else {
             i = j;
             continue;
         };
-        let Ok(mut tface) = ttf_parser::Face::parse((*data).as_ref(), index) else {
-            i = j;
-            continue;
-        };
-        let weight_key = apply_weight(&mut tface, style.weight);
-        let upem = tface.units_per_em() as f64;
-        let scale = em / upem;
-        let hb = rustybuzz::Face::from_face(tface.clone());
+        let weight_key = shaper.weight_key;
+        let scale = em / shaper.units_per_em;
         let mut buf = rustybuzz::UnicodeBuffer::new();
         buf.push_str(&run);
         buf.guess_segment_properties();
-        let shaped = rustybuzz::shape(&hb, &[], buf);
+        let shaped = rustybuzz::shape(&shaper.hb, &[], buf);
         // Byte offset in `run` → index into chars[i..j].
         let byte_to_char: HashMap<usize, usize> = run.char_indices().enumerate().map(|(k, (b, _))| (b, k)).collect();
         for (info, pos) in shaped.glyph_infos().iter().zip(shaped.glyph_positions()) {
@@ -537,7 +652,7 @@ fn wrap(glyphs: Vec<Glyph>, max_width: Option<f64>) -> Vec<Vec<Glyph>> {
 
 fn layout(spans: &[Span], para: &TextStyle) -> VMobject {
     let label: String = spans.iter().map(|s| s.text.as_str()).collect();
-    let resolved: Vec<Resolved> = spans.iter().map(|s| resolve_fonts(&s.style)).collect();
+    let resolved: Vec<Arc<Resolved>> = spans.iter().map(|s| resolve_fonts(&s.style)).collect();
     // (char, global char index, span) per hard line.
     let mut hard_lines: Vec<Vec<(char, u32, usize)>> = vec![Vec::new()];
     let mut n = 0u32;
@@ -578,12 +693,18 @@ fn layout(spans: &[Span], para: &TextStyle) -> VMobject {
             if g.is_space {
                 continue;
             }
-            let Some((data, index)) = face_data(g.face) else { continue };
-            let Ok(mut face) = ttf_parser::Face::parse((*data).as_ref(), index) else { continue };
-            if g.weight_key > 0 {
-                face.set_variation(WGHT, g.weight_key as f32);
-            }
-            let unit = outline(g.face, &face, g.gid, g.weight_key);
+            // Most glyphs were drawn before: no need to open the font again for those.
+            let unit = match cached_outline((g.face, g.gid, g.weight_key)) {
+                Some(unit) => unit,
+                None => {
+                    let Some((data, index)) = face_data(g.face) else { continue };
+                    let Ok(mut face) = ttf_parser::Face::parse((*data).as_ref(), index) else { continue };
+                    if g.weight_key > 0 {
+                        face.set_variation(WGHT, g.weight_key as f32);
+                    }
+                    outline(g.face, &face, g.gid, g.weight_key)
+                }
+            };
             if unit.is_empty() {
                 continue;
             }
@@ -612,17 +733,21 @@ fn layout(spans: &[Span], para: &TextStyle) -> VMobject {
     group
 }
 
+/// Namespace for text mobjects built from font outlines; the constructors return a [`VMobject`].
 pub struct Text;
 
 impl Text {
+    /// Text in the default style.
     pub fn new(text: &str) -> VMobject {
         Self::styled(text, TextStyle::default())
     }
 
+    /// Text at `font_size` points, otherwise in the default style.
     pub fn sized(text: &str, font_size: f64) -> VMobject {
         Self::styled(text, TextStyle::default().size(font_size))
     }
 
+    /// Text in the given style.
     pub fn styled(text: &str, style: TextStyle) -> VMobject {
         let span = Span::new(text, style.clone());
         layout(&[span], &style)
@@ -752,10 +877,12 @@ fn parse_attrs(s: &str) -> Vec<(String, String)> {
 /// A number shown as text (Manim's `DecimalNumber`). Rebuild it in an updater to animate it.
 pub struct DecimalNumber;
 impl DecimalNumber {
+    /// A number formatted with `decimals` places, in the default style (a leading minus is U+2212).
     pub fn new(value: f64, decimals: usize) -> VMobject {
         Self::styled(value, decimals, TextStyle::default())
     }
 
+    /// Like [`DecimalNumber::new`] with an explicit style.
     pub fn styled(value: f64, decimals: usize, style: TextStyle) -> VMobject {
         let s = format!("{value:.decimals$}");
         let s =
@@ -767,6 +894,7 @@ impl DecimalNumber {
 /// Manim's `Integer`.
 pub struct Integer;
 impl Integer {
+    /// An integer shown as text.
     pub fn new(value: i64) -> VMobject {
         DecimalNumber::new(value as f64, 0).with_kind("Integer")
     }

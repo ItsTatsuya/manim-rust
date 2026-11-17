@@ -23,11 +23,15 @@ use std::io::Write;
 
 use serde_json::{json, Value};
 
+/// How progress is reported on stderr.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ProgressMode {
+    /// Readable one-line messages (the default).
     #[default]
     Human,
+    /// One JSON object per line, as described in the module docs.
     Json,
+    /// Silent.
     None,
 }
 
@@ -46,18 +50,22 @@ impl std::str::FromStr for ProgressMode {
 /// Writes events in the configured mode.
 #[derive(Clone, Copy, Debug)]
 pub struct Events {
+    /// The mode events are written in.
     pub mode: ProgressMode,
 }
 
 impl Events {
+    /// Events that report in `mode`.
     pub fn new(mode: ProgressMode) -> Self {
         Events { mode }
     }
 
+    /// Whether the mode is [`ProgressMode::Json`].
     pub fn json(&self) -> bool {
         self.mode == ProgressMode::Json
     }
 
+    /// Whether the mode is [`ProgressMode::Human`].
     pub fn human(&self) -> bool {
         self.mode == ProgressMode::Human
     }

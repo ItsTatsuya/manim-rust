@@ -14,7 +14,7 @@ use tiny_skia::{
     FillRule, FilterQuality, LineCap, LineJoin, Paint, PathBuilder, Pixmap, PixmapPaint, PixmapRef, Stroke, Transform,
 };
 
-use super::{DisplayList, DrawPath, Layer, Renderer};
+use super::{DisplayList, DrawPath, Frame, FrameFinisher, FramePool, Layer, Renderer};
 
 /// Which rasterizer a [`CpuRenderer`] uses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -39,9 +39,11 @@ impl Raster {
     }
 }
 
+/// Rasterizes frames in parallel across all cores, one frame per core.
 pub struct CpuRenderer {
     threads: usize,
     raster: Raster,
+    pool: FramePool,
     #[cfg(feature = "vello")]
     calib: Calibration,
 }
@@ -52,10 +54,12 @@ impl CpuRenderer {
         Self::with_raster(Raster::best())
     }
 
+    /// A renderer fixed to a specific [`Raster`].
     pub fn with_raster(raster: Raster) -> Self {
         CpuRenderer {
             threads: rayon::current_num_threads(),
             raster,
+            pool: FramePool::new(),
             #[cfg(feature = "vello")]
             calib: Calibration::default(),
         }
@@ -149,13 +153,13 @@ impl Calibration {
 
 /// 0 = tiny-skia, 1 = vello (falls back to tiny-skia for frames with images).
 #[cfg(feature = "vello")]
-fn rasterize_with(dl: &DisplayList, raster: usize) -> Vec<u8> {
+fn rasterize_with(dl: &DisplayList, raster: usize, pool: &FramePool) -> Vec<u8> {
     if raster == 1 {
-        if let Some(px) = super::vello::rasterize(dl) {
+        if let Some(px) = super::vello::rasterize_pooled(dl, pool) {
             return px;
         }
     }
-    rasterize(dl)
+    rasterize_pooled(dl, pool)
 }
 
 impl Default for CpuRenderer {
@@ -165,7 +169,10 @@ impl Default for CpuRenderer {
 }
 
 fn color(c: [f32; 4]) -> tiny_skia::Color {
-    tiny_skia::Color::from_rgba(c[0], c[1], c[2], c[3]).unwrap_or(tiny_skia::Color::BLACK)
+    // Non-finite or out-of-range components draw nothing (matching the vello path).
+    let ok = c.iter().all(|v| v.is_finite());
+    let c = c.map(|v| v.clamp(0.0, 1.0));
+    tiny_skia::Color::from_rgba(c[0], c[1], c[2], c[3]).filter(|_| ok).unwrap_or(tiny_skia::Color::TRANSPARENT)
 }
 
 /// Rasterized background layers, keyed by the layer's pointer. The `Arc` is kept so a
@@ -174,26 +181,33 @@ type LayerCache = Vec<(Arc<Vec<DrawPath>>, u32, u32, [u32; 4], Arc<Pixmap>)>;
 static LAYERS: Mutex<LayerCache> = Mutex::new(Vec::new());
 const MAX_CACHED_LAYERS: usize = 4;
 
-pub(super) fn base_pixmap(dl: &DisplayList) -> Pixmap {
+pub(super) fn base_pixmap(dl: &DisplayList, pool: &FramePool) -> Pixmap {
     let (w, h) = (dl.width.max(1), dl.height.max(1));
+    // A pixmap over a pooled buffer; every byte is overwritten by the caller's fill or copy.
+    let pooled = || {
+        let size = tiny_skia::IntSize::from_wh(w, h).expect("valid frame size");
+        Pixmap::from_vec(pool.take(w as usize * h as usize * 4), size).expect("buffer matches frame size")
+    };
     let blank = || {
-        let mut pm = Pixmap::new(w, h).expect("valid frame size");
+        let mut pm = pooled();
         pm.fill(color(dl.background));
         pm
     };
     let Some(Layer(layer)) = &dl.background_layer else { return blank() };
     let bg = dl.background.map(f32::to_bits);
     let found = {
-        let cache = LAYERS.lock().unwrap();
+        let cache = LAYERS.lock().unwrap_or_else(|e| e.into_inner());
         cache.iter().find(|e| Arc::ptr_eq(&e.0, layer) && e.1 == w && e.2 == h && e.3 == bg).map(|e| e.4.clone())
     };
     let pm = match found {
         Some(pm) => pm,
         None => {
-            let mut pm = blank();
+            // Not from the pool: the cache keeps this one.
+            let mut pm = Pixmap::new(w, h).expect("valid frame size");
+            pm.fill(color(dl.background));
             draw_items(&mut pm, layer.iter());
             let pm = Arc::new(pm);
-            let mut cache = LAYERS.lock().unwrap();
+            let mut cache = LAYERS.lock().unwrap_or_else(|e| e.into_inner());
             if cache.len() >= MAX_CACHED_LAYERS {
                 cache.remove(0);
             }
@@ -201,7 +215,9 @@ pub(super) fn base_pixmap(dl: &DisplayList) -> Pixmap {
             pm
         }
     };
-    (*pm).clone()
+    let mut out = pooled();
+    out.data_mut().copy_from_slice(pm.data());
+    out
 }
 
 fn draw_items<'a>(pm: &mut Pixmap, items: impl IntoIterator<Item = &'a DrawPath>) {
@@ -243,12 +259,66 @@ fn draw_items<'a>(pm: &mut Pixmap, items: impl IntoIterator<Item = &'a DrawPath>
     }
 }
 
-/// Rasterize one display list into RGBA8.
+/// Rasterize one display list into RGBA8. Test helper, not a stable API.
+#[doc(hidden)]
 pub fn rasterize(dl: &DisplayList) -> Vec<u8> {
-    let mut pm = base_pixmap(dl);
+    rasterize_pooled(dl, &FramePool::new())
+}
+
+/// [`rasterize`] into a buffer from `pool`.
+pub(crate) fn rasterize_pooled(dl: &DisplayList, pool: &FramePool) -> Vec<u8> {
+    let mut pm = base_pixmap(dl, pool);
     draw_items(&mut pm, &dl.items);
     // The background is opaque, so premultiplied == straight alpha here.
     pm.take()
+}
+
+impl CpuRenderer {
+    /// Rasterize every frame in parallel and pass each through `finish` on the same thread
+    /// the moment it is drawn. Only the rasterizing itself is timed for calibration.
+    fn render_each<R: Send>(
+        &mut self,
+        frames: &[&DisplayList],
+        finish: &(dyn Fn(usize, Vec<u8>) -> R + Sync),
+    ) -> Vec<R> {
+        let pool = &self.pool;
+        match self.raster {
+            Raster::Skia => {
+                frames.par_iter().enumerate().map(|(i, dl)| finish(i, rasterize_pooled(dl, pool))).collect()
+            }
+            #[cfg(feature = "vello")]
+            Raster::Vello => {
+                frames.par_iter().enumerate().map(|(i, dl)| finish(i, rasterize_with(dl, 1, pool))).collect()
+            }
+            #[cfg(feature = "vello")]
+            Raster::Adaptive => {
+                let plans = self.calib.plan(frames);
+                type Timed = Option<(usize, usize, f64)>;
+                let out: Vec<(R, Timed)> = frames
+                    .par_iter()
+                    .zip(&plans)
+                    .enumerate()
+                    .map(|(i, (dl, plan))| match *plan {
+                        Plan::Use(r) => (finish(i, rasterize_with(dl, r, pool)), None),
+                        Plan::Time(b, r) => {
+                            let t = std::time::Instant::now();
+                            let px = rasterize_with(dl, r, pool);
+                            let secs = t.elapsed().as_secs_f64();
+                            (finish(i, px), Some((b, r, secs)))
+                        }
+                    })
+                    .collect();
+                let mut frames_out = Vec::with_capacity(out.len());
+                for (frame, timing) in out {
+                    if let Some((b, r, secs)) = timing {
+                        self.calib.record(b, r, secs);
+                    }
+                    frames_out.push(frame);
+                }
+                frames_out
+            }
+        }
+    }
 }
 
 impl Renderer for CpuRenderer {
@@ -264,36 +334,15 @@ impl Renderer for CpuRenderer {
     }
 
     fn render_batch(&mut self, frames: &[&DisplayList]) -> Result<Vec<Vec<u8>>> {
-        match self.raster {
-            Raster::Skia => Ok(frames.par_iter().map(|dl| rasterize(dl)).collect()),
-            #[cfg(feature = "vello")]
-            Raster::Vello => Ok(frames.par_iter().map(|dl| rasterize_with(dl, 1)).collect()),
-            #[cfg(feature = "vello")]
-            Raster::Adaptive => {
-                let plans = self.calib.plan(frames);
-                type Timed = Option<(usize, usize, f64)>;
-                let out: Vec<(Vec<u8>, Timed)> = frames
-                    .par_iter()
-                    .zip(&plans)
-                    .map(|(dl, plan)| match *plan {
-                        Plan::Use(r) => (rasterize_with(dl, r), None),
-                        Plan::Time(b, r) => {
-                            let t = std::time::Instant::now();
-                            let px = rasterize_with(dl, r);
-                            (px, Some((b, r, t.elapsed().as_secs_f64())))
-                        }
-                    })
-                    .collect();
-                let mut frames_out = Vec::with_capacity(out.len());
-                for (px, timing) in out {
-                    if let Some((b, r, secs)) = timing {
-                        self.calib.record(b, r, secs);
-                    }
-                    frames_out.push(px);
-                }
-                Ok(frames_out)
-            }
-        }
+        Ok(self.render_each(frames, &|_, px| px))
+    }
+
+    fn render_batch_with(&mut self, frames: &[&DisplayList], finish: &FrameFinisher) -> Result<Vec<Frame>> {
+        self.render_each(frames, finish).into_iter().collect()
+    }
+
+    fn use_pool(&mut self, pool: FramePool) {
+        self.pool = pool;
     }
 
     fn batch_size(&self) -> usize {

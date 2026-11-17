@@ -37,10 +37,13 @@ MANIM OPTIONS (passed to the scene):
 
 ENVIRONMENT:
   MANIM_RS_CACHE    Build cache location (default: your OS cache directory)
-  MANIM_RS_SOURCE   Path to the manim-rust source to build against
+  MANIM_RS_SOURCE   Path to a manim-rust checkout to build scenes against. Default: the
+                    source this runner was built from; if that directory no longer exists
+                    (e.g. a `cargo install` from crates.io), the published `manim` crate of
+                    the same version is downloaded from crates.io instead.
 ";
 
-/// The engine source this runner was built from.
+/// The engine source this runner was built from (may be gone by run time).
 const BUILT_FROM: &str = env!("CARGO_MANIFEST_DIR");
 
 fn main() -> ExitCode {
@@ -166,7 +169,7 @@ name = "{bin}"
 path = "{script_toml}"
 
 [dependencies]
-manim = {{ path = "{engine_toml}" }}
+manim = {{ {engine_dep} }}
 
 [profile.release]
 incremental = true
@@ -175,13 +178,13 @@ incremental = true
 "#,
         script = script.display(),
         script_toml = toml_path(&script),
-        engine_toml = toml_path(&engine),
+        engine_dep = engine.dependency(),
     );
     write_if_changed(&project.join("Cargo.toml"), &manifest)?;
     let lock = project.join("Cargo.lock");
-    if !lock.exists() {
+    if let (false, Engine::Path(dir)) = (lock.exists(), &engine) {
         // Start from the engine's tested dependency versions.
-        let _ = fs::copy(engine.join("Cargo.lock"), &lock);
+        let _ = fs::copy(dir.join("Cargo.lock"), &lock);
     }
 
     remove_executables(&target, &id); // leftovers from an interrupted run
@@ -316,15 +319,41 @@ export default class {SCENE} extends Scene {
 }
 "#;
 
-fn engine_source() -> Result<PathBuf, String> {
-    let src = env::var_os("MANIM_RS_SOURCE").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(BUILT_FROM));
-    if !src.join("Cargo.toml").is_file() {
-        return Err(format!(
-            "manim-rust source not found at {} (set MANIM_RS_SOURCE, or reinstall with `cargo install --path <repo>`)",
-            src.display()
-        ));
+/// Where the scene project gets the `manim` crate from.
+enum Engine {
+    /// A source checkout (this runner's own, or `MANIM_RS_SOURCE`).
+    Path(PathBuf),
+    /// The published crate, pinned to this runner's version.
+    Registry(&'static str),
+}
+
+impl Engine {
+    /// The right-hand side of the `manim = { ... }` dependency entry.
+    fn dependency(&self) -> String {
+        match self {
+            Engine::Path(dir) => format!(r#"path = "{}""#, toml_path(dir)),
+            Engine::Registry(version) => format!(r#"version = "={version}""#),
+        }
     }
-    canonical(&src).map_err(|e| e.to_string())
+}
+
+fn engine_source() -> Result<Engine, String> {
+    if let Some(over) = env::var_os("MANIM_RS_SOURCE") {
+        let src = PathBuf::from(over);
+        if !src.join("Cargo.toml").is_file() {
+            return Err(format!(
+                "MANIM_RS_SOURCE={} has no Cargo.toml; point it at a manim-rust checkout or unset it",
+                src.display()
+            ));
+        }
+        return canonical(&src).map(Engine::Path).map_err(|e| e.to_string());
+    }
+    let built = Path::new(BUILT_FROM);
+    if built.join("Cargo.toml").is_file() {
+        return canonical(built).map(Engine::Path).map_err(|e| e.to_string());
+    }
+    // Installed from crates.io (or the build tree was deleted): depend on the release.
+    Ok(Engine::Registry(env!("CARGO_PKG_VERSION")))
 }
 
 fn cache_dir() -> PathBuf {

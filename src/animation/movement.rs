@@ -17,6 +17,7 @@ pub struct Rotate {
 }
 
 impl Rotate {
+    /// Rotate `id` by `angle` radians about its center.
     pub fn new(id: MobjectId, angle: f64) -> Self {
         Rotate {
             id,
@@ -26,6 +27,7 @@ impl Rotate {
             original: VMobject::default(),
         }
     }
+    /// Rotate about `p` instead of the center.
     pub fn about(mut self, p: Point) -> Self {
         self.about = Some(p);
         self
@@ -57,6 +59,7 @@ pub struct MoveAlongPath {
 }
 
 impl MoveAlongPath {
+    /// Move `id`'s center along `path`.
     pub fn new(id: MobjectId, path: VMobject) -> Self {
         MoveAlongPath {
             id,
@@ -91,6 +94,7 @@ pub struct ChangeValue {
 }
 
 impl ChangeValue {
+    /// Animate tracker `t` to `target`.
     pub fn new(t: TrackerId, target: f64) -> Self {
         ChangeValue { t, cfg: AnimConfig::default(), target, start: 0.0 }
     }
@@ -113,6 +117,7 @@ impl Animation for ChangeValue {
 /// closure, so for seeking it should depend only on `alpha` and the world.
 type AlphaFn = std::rc::Rc<std::cell::RefCell<dyn FnMut(&mut World, f64)>>;
 
+/// Run a closure each frame with the eased progress; see the note on seeking above.
 #[derive(Clone)]
 pub struct UpdateFromAlpha {
     cfg: AnimConfig,
@@ -120,6 +125,7 @@ pub struct UpdateFromAlpha {
 }
 
 impl UpdateFromAlpha {
+    /// Call `f(world, alpha)` every frame.
     pub fn new(f: impl FnMut(&mut World, f64) + 'static) -> Self {
         UpdateFromAlpha { cfg: AnimConfig::default(), f: std::rc::Rc::new(std::cell::RefCell::new(f)) }
     }

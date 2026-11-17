@@ -35,8 +35,11 @@ pub const ENTRIES: &str = "TableEntries";
 /// A table of mobjects with optional row and column labels and grid lines.
 #[derive(Clone, Debug)]
 pub struct Table {
+    /// The cells, row by row.
     pub entries: Vec<Vec<VMobject>>,
+    /// Labels shown left of each row (empty for none).
     pub row_labels: Vec<VMobject>,
+    /// Labels shown above each column (empty for none).
     pub col_labels: Vec<VMobject>,
     /// Shown above the row labels and left of the column labels.
     pub top_left_entry: Option<VMobject>,
@@ -50,12 +53,15 @@ pub struct Table {
     pub include_inner_lines: bool,
     /// Grid line color (default: the default mobject color).
     pub line_color: Option<Color>,
+    /// Grid line width in stroke units.
     pub line_width: f64,
     /// Put a 75%-opaque rectangle behind each entry.
     pub add_background_rectangles_to_entries: bool,
+    /// Color of the per-entry background rectangles.
     pub entries_background_color: Color,
     /// Put a 75%-opaque rectangle behind the whole table.
     pub include_background_rectangle: bool,
+    /// Color of the background rectangle behind the whole table.
     pub background_rectangle_color: Color,
 }
 
@@ -143,47 +149,58 @@ impl Table {
         Ok(Self::from_mobjects(entries))
     }
 
+    /// Set the row labels (one per row).
     pub fn row_labels(mut self, labels: Vec<VMobject>) -> Self {
         self.row_labels = labels;
         self
     }
+    /// Set the column labels (one per column).
     pub fn col_labels(mut self, labels: Vec<VMobject>) -> Self {
         self.col_labels = labels;
         self
     }
+    /// Set the mobject shown in the corner above the row labels and left of the column labels.
     pub fn top_left_entry(mut self, m: VMobject) -> Self {
         self.top_left_entry = Some(m);
         self
     }
+    /// Set the vertical gap between rows.
     pub fn v_buff(mut self, b: f64) -> Self {
         self.v_buff = b;
         self
     }
+    /// Set the horizontal gap between columns.
     pub fn h_buff(mut self, b: f64) -> Self {
         self.h_buff = b;
         self
     }
+    /// Draw (or not) lines around the whole table.
     pub fn include_outer_lines(mut self, on: bool) -> Self {
         self.include_outer_lines = on;
         self
     }
+    /// Draw (or not) lines between rows and columns.
     pub fn include_inner_lines(mut self, on: bool) -> Self {
         self.include_inner_lines = on;
         self
     }
+    /// Set the grid line color.
     pub fn line_color(mut self, c: Color) -> Self {
         self.line_color = Some(c);
         self
     }
+    /// Set the grid line width in stroke units.
     pub fn line_width(mut self, w: f64) -> Self {
         self.line_width = w;
         self
     }
+    /// Put a translucent rectangle of `color` behind each entry.
     pub fn add_background_rectangles_to_entries(mut self, color: Color) -> Self {
         self.add_background_rectangles_to_entries = true;
         self.entries_background_color = color;
         self
     }
+    /// Put a translucent rectangle of `color` behind the whole table.
     pub fn include_background_rectangle(mut self, color: Color) -> Self {
         self.include_background_rectangle = true;
         self.background_rectangle_color = color;
@@ -363,7 +380,7 @@ mod tests {
         assert!((cell2.get_center() - (cell.get_center() * 2.0 + RIGHT)).length() < 1e-9);
         // Cell 1,1 spans the widest entry of its column plus a buffer.
         assert!((cell.width() - 2.3).abs() < 1e-9 && (cell.height() - 1.8).abs() < 1e-9);
-        let hl = t.clone().add_highlighted_cell(1, 2, crate::color::GREEN);
+        let hl = t.add_highlighted_cell(1, 2, crate::color::GREEN);
         assert_eq!(hl.children.len(), 4, "highlights go in the backgrounds group");
         assert_eq!(hl.children[0].meta.kind(), BACKGROUNDS);
         assert_eq!(hl.children[0].children[0].meta.kind(), crate::mobject::grid::HIGHLIGHT);

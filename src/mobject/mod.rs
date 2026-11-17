@@ -26,16 +26,26 @@ use crate::constants::*;
 /// Decoded raster image, stored premultiplied for the rasterizer.
 #[derive(Debug)]
 pub struct RasterImage {
+    /// Width in pixels.
     pub width: u32,
+    /// Height in pixels.
     pub height: u32,
     /// Premultiplied RGBA8, `width * height * 4` bytes.
     pub premultiplied: Vec<u8>,
 }
 
 impl RasterImage {
-    /// Build from straight (non-premultiplied) RGBA8 pixels.
-    pub fn from_rgba(width: u32, height: u32, mut rgba: Vec<u8>) -> Self {
-        assert_eq!(rgba.len(), width as usize * height as usize * 4, "RGBA buffer size");
+    /// Build from straight (non-premultiplied) RGBA8 pixels. Fails when `rgba` is not
+    /// exactly `width * height * 4` bytes.
+    pub fn from_rgba(width: u32, height: u32, mut rgba: Vec<u8>) -> anyhow::Result<Self> {
+        let expected = (width as usize).checked_mul(height as usize).and_then(|n| n.checked_mul(4));
+        if expected != Some(rgba.len()) {
+            anyhow::bail!(
+                "RGBA buffer holds {} bytes, but {width}x{height} pixels need {}",
+                rgba.len(),
+                width as u64 * height as u64 * 4
+            );
+        }
         for px in rgba.as_chunks_mut::<4>().0 {
             let a = px[3] as u16;
             if a < 255 {
@@ -44,7 +54,7 @@ impl RasterImage {
                 }
             }
         }
-        RasterImage { width, height, premultiplied: rgba }
+        Ok(RasterImage { width, height, premultiplied: rgba })
     }
 }
 
@@ -83,7 +93,9 @@ pub struct Meta {
 /// entries row by row; transforms scale the buffers along with the points.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Grid {
+    /// Number of rows (labels count).
     pub rows: usize,
+    /// Number of columns (labels count).
     pub cols: usize,
     /// Horizontal gap between columns (Manim's `h_buff`).
     pub h_buff: f64,
@@ -96,6 +108,7 @@ pub struct Grid {
 }
 
 impl Meta {
+    /// The mobject's kind tag (`"Text"`, `"Math"`, `"Table"`, ...), empty if untagged.
     pub fn kind(&self) -> &str {
         self.kind.as_deref().unwrap_or("")
     }
@@ -104,11 +117,14 @@ impl Meta {
 /// One continuous run of cubic curves.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Subpath {
+    /// The cubic BÃ©ziers in order; each starts where the previous one ends.
     pub curves: Vec<Cubic>,
+    /// Whether the last curve joins back to the first.
     pub closed: bool,
 }
 
 impl Subpath {
+    /// A subpath from cubics and a closed flag.
     pub fn new(curves: Vec<Cubic>, closed: bool) -> Self {
         Subpath { curves, closed }
     }
@@ -127,26 +143,40 @@ impl Subpath {
         Subpath { curves: vec![[p; 4]], closed: false }
     }
 
+    /// First point, if there are curves.
     pub fn start(&self) -> Option<Point> {
         self.curves.first().map(|c| c[0])
     }
 
+    /// Last point, if there are curves.
     pub fn end(&self) -> Option<Point> {
         self.curves.last().map(|c| c[3])
     }
 }
 
+/// Deepest group nesting accepted from scripts, `add` / `push` and [`Scene::add`](crate::Scene::add).
+pub const MAX_NESTING: usize = 256;
+
 /// A vectorized mobject. Groups are VMobjects with no paths and some children.
 #[derive(Clone, Debug, PartialEq)]
 pub struct VMobject {
+    /// The mobject's own outlines (empty for pure groups).
     pub subpaths: Vec<Subpath>,
+    /// Fill color.
     pub fill_color: Color,
+    /// Fill opacity in `[0, 1]` (0 = no fill).
     pub fill_opacity: f64,
+    /// Stroke color.
     pub stroke_color: Color,
+    /// Stroke opacity in `[0, 1]`.
     pub stroke_opacity: f64,
+    /// Stroke width in Manim's units (1 = 0.01 scene units).
     pub stroke_width: f64,
+    /// Draw order within the scene: higher draws on top.
     pub z_index: i32,
+    /// Sub-mobjects drawn with this one.
     pub children: Vec<VMobject>,
+    /// Non-geometric data: kind tag, label, text and image metadata.
     pub meta: Meta,
 }
 
@@ -170,26 +200,47 @@ impl Default for VMobject {
 pub struct VGroup;
 
 impl VGroup {
+    /// A group of `children`.
     #[allow(clippy::new_ret_no_self)]
     pub fn new(children: Vec<VMobject>) -> VMobject {
         VMobject::group(children)
     }
 }
 
+/// Build a group from mobjects (each converted with `.into()`): `vgroup![a, b]`.
 #[macro_export]
 macro_rules! vgroup {
     ($($m:expr),* $(,)?) => { $crate::mobject::VMobject::group(vec![$($m.into()),*]) };
 }
 
+/// Pre-order walk over a mobject and its descendants (see [`VMobject::family_iter`]).
+pub struct FamilyIter<'a> {
+    next: Option<&'a VMobject>,
+    stack: Vec<&'a VMobject>,
+}
+
+impl<'a> Iterator for FamilyIter<'a> {
+    type Item = &'a VMobject;
+
+    fn next(&mut self) -> Option<&'a VMobject> {
+        let m = self.next.take().or_else(|| self.stack.pop())?;
+        self.stack.extend(m.children.iter().rev());
+        Some(m)
+    }
+}
+
 impl VMobject {
+    /// An empty mobject with the current default style.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// A mobject made of `subpaths`.
     pub fn from_subpaths(subpaths: Vec<Subpath>) -> Self {
         VMobject { subpaths, ..Default::default() }
     }
 
+    /// A group holding `children`.
     pub fn group(children: Vec<VMobject>) -> Self {
         VMobject { children, ..Default::default() }
     }
@@ -197,23 +248,35 @@ impl VMobject {
     // ------------------------------------------------------------------ family
 
     /// Pre-order traversal of this mobject and all descendants.
+    /// Iterative, so the depth of the tree never costs call-stack.
     pub fn family(&self) -> Vec<&VMobject> {
-        let mut out = Vec::new();
-        fn walk<'a>(m: &'a VMobject, out: &mut Vec<&'a VMobject>) {
-            out.push(m);
-            for c in &m.children {
-                walk(c, out);
-            }
-        }
-        walk(self, &mut out);
-        out
+        self.family_iter().collect()
     }
 
+    /// [`family`](Self::family) as an iterator, in the same order: nothing is allocated for
+    /// a mobject without children (every shape), so hot paths use this.
+    pub fn family_iter(&self) -> FamilyIter<'_> {
+        FamilyIter { next: Some(self), stack: Vec::new() }
+    }
+
+    /// Call `f` on this mobject and all descendants, parents first.
     pub fn for_each_mut(&mut self, f: &mut impl FnMut(&mut VMobject)) {
-        f(self);
-        for c in &mut self.children {
-            c.for_each_mut(f);
+        let mut stack = vec![self];
+        while let Some(m) = stack.pop() {
+            f(m);
+            stack.extend(m.children.iter_mut().rev());
         }
+    }
+
+    /// Levels in this mobject's tree: 1 for a mobject without children, 2 for a group of such.
+    pub fn depth(&self) -> usize {
+        let mut deepest = 0;
+        let mut stack = vec![(self, 1usize)];
+        while let Some((m, d)) = stack.pop() {
+            deepest = deepest.max(d);
+            stack.extend(m.children.iter().map(|c| (c, d + 1)));
+        }
+        deepest
     }
 
     /// Every family member that has paths, flattened into childless copies.
@@ -230,15 +293,28 @@ impl VMobject {
             .collect()
     }
 
-    /// Append a child (Manim's `add`; builder style).
+    /// Append a child (Manim's `add`; builder style). A child that would take the tree past
+    /// [`MAX_NESTING`] levels is left out; use [`try_push`](Self::try_push) to get the error.
     #[allow(clippy::should_implement_trait)]
     pub fn add(mut self, child: impl Into<VMobject>) -> Self {
-        self.children.push(child.into());
+        let _ = self.try_push(child);
         self
     }
 
+    /// Like [`add`](Self::add), in place.
     pub fn push(&mut self, child: impl Into<VMobject>) {
-        self.children.push(child.into());
+        let _ = self.try_push(child);
+    }
+
+    /// Append a child unless the tree would nest deeper than [`MAX_NESTING`] levels (deep
+    /// trees are walked recursively by cloning, comparing and dropping).
+    pub fn try_push(&mut self, child: impl Into<VMobject>) -> anyhow::Result<()> {
+        let child = child.into();
+        if child.depth() >= MAX_NESTING {
+            anyhow::bail!("groups nested more than {MAX_NESTING} levels deep are not supported");
+        }
+        self.children.push(child);
+        Ok(())
     }
 
     /// Index of the first direct child whose `meta.kind` is `kind`.
@@ -251,12 +327,14 @@ impl VMobject {
         self.children.iter().find(|c| c.meta.kind() == kind)
     }
 
+    /// Mutable version of [`VMobject::child_of_kind`].
     pub fn child_of_kind_mut(&mut self, kind: &str) -> Option<&mut VMobject> {
         self.children.iter_mut().find(|c| c.meta.kind() == kind)
     }
 
+    /// Total number of cubic curves in this mobject and its descendants.
     pub fn num_curves(&self) -> usize {
-        self.family().iter().flat_map(|m| &m.subpaths).map(|s| s.curves.len()).sum()
+        self.family_iter().flat_map(|m| &m.subpaths).map(|s| s.curves.len()).sum()
     }
 
     /// Run `f` on an owned copy and store the result (lets `&mut` holders use builder methods).
@@ -310,8 +388,7 @@ impl VMobject {
     /// Axis-aligned bounding box `(min, max)` over all control points.
     pub fn bounding_box(&self) -> Option<(Point, Point)> {
         let mut it = self
-            .family()
-            .into_iter()
+            .family_iter()
             .flat_map(|m| m.subpaths.iter())
             .flat_map(|s| s.curves.iter())
             .flat_map(|c| c.iter().copied());
@@ -319,6 +396,7 @@ impl VMobject {
         Some(it.fold((first, first), |(lo, hi), p| (lo.min(p), hi.max(p))))
     }
 
+    /// Center of the bounding box of the whole family.
     pub fn get_center(&self) -> Point {
         self.bounding_box().map(|(lo, hi)| (lo + hi) / 2.0).unwrap_or(ORIGIN)
     }
@@ -338,34 +416,43 @@ impl VMobject {
         Point::new(pick(dir.x, lo.x, hi.x), pick(dir.y, lo.y, hi.y), pick(dir.z, lo.z, hi.z))
     }
 
+    /// The bounding-box point in direction `dir` (a corner or edge midpoint, see [`get_critical_point`](VMobject::get_critical_point)).
     pub fn get_corner(&self, dir: Point) -> Point {
         self.get_critical_point(dir)
     }
+    /// Midpoint of the top edge.
     pub fn get_top(&self) -> Point {
         self.get_critical_point(UP)
     }
+    /// Midpoint of the bottom edge.
     pub fn get_bottom(&self) -> Point {
         self.get_critical_point(DOWN)
     }
+    /// Midpoint of the left edge.
     pub fn get_left(&self) -> Point {
         self.get_critical_point(LEFT)
     }
+    /// Midpoint of the right edge.
     pub fn get_right(&self) -> Point {
         self.get_critical_point(RIGHT)
     }
 
+    /// Bounding-box width in scene units.
     pub fn width(&self) -> f64 {
         self.bounding_box().map(|(lo, hi)| hi.x - lo.x).unwrap_or(0.0)
     }
 
+    /// Bounding-box height in scene units.
     pub fn height(&self) -> f64 {
         self.bounding_box().map(|(lo, hi)| hi.y - lo.y).unwrap_or(0.0)
     }
 
+    /// First point of the first path, or the origin if there is none.
     pub fn get_start(&self) -> Point {
         self.family().iter().find_map(|m| m.subpaths.first().and_then(|s| s.start())).unwrap_or(ORIGIN)
     }
 
+    /// Last point of the last path, or the origin if there is none.
     pub fn get_end(&self) -> Point {
         self.family().iter().rev().find_map(|m| m.subpaths.last().and_then(|s| s.end())).unwrap_or(ORIGIN)
     }
@@ -395,10 +482,12 @@ impl VMobject {
 
     // ------------------------------------------------------------------ transforms
 
+    /// Translate by `v`.
     pub fn shift(self, v: Point) -> Self {
         self.map_points(|p| p + v)
     }
 
+    /// Move so the center is at `p`.
     pub fn move_to(self, p: Point) -> Self {
         let c = self.get_center();
         self.shift(p - c)
@@ -422,15 +511,18 @@ impl VMobject {
         self.shift(pt(0.0, y - c.y))
     }
 
+    /// Move so the center is at the origin.
     pub fn center(self) -> Self {
         self.move_to(ORIGIN)
     }
 
+    /// Scale about the center by `factor`.
     pub fn scale(self, factor: f64) -> Self {
         let c = self.get_center();
         self.scale_about(factor, c)
     }
 
+    /// Scale about the point `about` by `factor`.
     pub fn scale_about(self, factor: f64, about: Point) -> Self {
         self.map_points(|p| about + (p - about) * factor)
     }
@@ -447,6 +539,7 @@ impl VMobject {
         })
     }
 
+    /// Scale uniformly to width `w` (no-op for zero width).
     pub fn set_width(self, w: f64) -> Self {
         let cur = self.width();
         if cur <= 0.0 {
@@ -455,6 +548,7 @@ impl VMobject {
         self.scale(w / cur)
     }
 
+    /// Scale uniformly to height `h` (no-op for zero height).
     pub fn set_height(self, h: f64) -> Self {
         let cur = self.height();
         if cur <= 0.0 {
@@ -469,6 +563,7 @@ impl VMobject {
         self.rotate_about(angle, c)
     }
 
+    /// Rotate counter-clockwise by `angle` radians about `about`.
     pub fn rotate_about(self, angle: f64, about: Point) -> Self {
         let (s, c) = angle.sin_cos();
         self.map_points(|p| {
@@ -482,10 +577,12 @@ impl VMobject {
         self.stretch(-1.0, 0)
     }
 
+    /// Place next to `other` on side `dir`, with the default gap.
     pub fn next_to(self, other: &VMobject, dir: Point) -> Self {
         self.next_to_buff(other, dir, DEFAULT_MOBJECT_TO_MOBJECT_BUFFER)
     }
 
+    /// Place next to `other` on side `dir`, leaving `buff` scene units.
     pub fn next_to_buff(self, other: &VMobject, dir: Point, buff: f64) -> Self {
         let target = other.get_critical_point(dir);
         self.next_to_point_buff(target, dir, buff)
@@ -552,19 +649,23 @@ impl VMobject {
             .unwrap_or_else(|| "VMobject".into())
     }
 
+    /// Place next to the point `p` on side `dir`, with the default gap.
     pub fn next_to_point(self, p: Point, dir: Point) -> Self {
         self.next_to_point_buff(p, dir, DEFAULT_MOBJECT_TO_MOBJECT_BUFFER)
     }
 
+    /// Place next to the point `p` on side `dir`, leaving `buff` scene units.
     pub fn next_to_point_buff(self, p: Point, dir: Point, buff: f64) -> Self {
         let align = self.get_critical_point(-dir);
         self.shift(p - align + dir * buff)
     }
 
+    /// Move to the frame edge or corner in direction `edge`, keeping the default gap.
     pub fn to_edge(self, edge: Point) -> Self {
         self.to_edge_buff(edge, DEFAULT_MOBJECT_TO_EDGE_BUFFER)
     }
 
+    /// Move to the frame edge or corner in direction `edge`, keeping `buff` scene units.
     pub fn to_edge_buff(self, edge: Point, buff: f64) -> Self {
         let sgn = |v: f64| {
             if v > 0.0 {
@@ -582,6 +683,7 @@ impl VMobject {
         self.shift(shift)
     }
 
+    /// Move to the frame corner in direction `corner` (same as [`to_edge`](VMobject::to_edge)).
     pub fn to_corner(self, corner: Point) -> Self {
         self.to_edge(corner)
     }
@@ -599,6 +701,7 @@ impl VMobject {
         self.arrange_buff(dir, DEFAULT_MOBJECT_TO_MOBJECT_BUFFER)
     }
 
+    /// Lay children out along `dir` with `buff` between them, then center the group at the origin.
     pub fn arrange_buff(mut self, dir: Point, buff: f64) -> Self {
         for i in 1..self.children.len() {
             let prev = self.children[i - 1].clone();
@@ -626,6 +729,7 @@ impl VMobject {
         self
     }
 
+    /// Set fill and stroke color of the whole family.
     pub fn set_color(self, c: Color) -> Self {
         self.map_style(|m| {
             m.fill_color = c;
@@ -633,6 +737,7 @@ impl VMobject {
         })
     }
 
+    /// Set fill color and opacity of the whole family.
     pub fn set_fill(self, c: Color, opacity: f64) -> Self {
         self.map_style(|m| {
             m.fill_color = c;
@@ -640,14 +745,17 @@ impl VMobject {
         })
     }
 
+    /// Set fill color of the whole family.
     pub fn set_fill_color(self, c: Color) -> Self {
         self.map_style(|m| m.fill_color = c)
     }
 
+    /// Set fill opacity of the whole family.
     pub fn set_fill_opacity(self, o: f64) -> Self {
         self.map_style(|m| m.fill_opacity = o)
     }
 
+    /// Set stroke color and width of the whole family.
     pub fn set_stroke(self, c: Color, width: f64) -> Self {
         self.map_style(|m| {
             m.stroke_color = c;
@@ -655,18 +763,22 @@ impl VMobject {
         })
     }
 
+    /// Set stroke color of the whole family.
     pub fn set_stroke_color(self, c: Color) -> Self {
         self.map_style(|m| m.stroke_color = c)
     }
 
+    /// Set stroke width of the whole family.
     pub fn set_stroke_width(self, w: f64) -> Self {
         self.map_style(|m| m.stroke_width = w)
     }
 
+    /// Set stroke opacity of the whole family.
     pub fn set_stroke_opacity(self, o: f64) -> Self {
         self.map_style(|m| m.stroke_opacity = o)
     }
 
+    /// Set fill and stroke opacity of the whole family.
     pub fn set_opacity(self, o: f64) -> Self {
         self.map_style(|m| {
             m.fill_opacity = o;
@@ -696,6 +808,7 @@ impl VMobject {
         self
     }
 
+    /// Set the draw order (higher draws on top).
     pub fn set_z_index(mut self, z: i32) -> Self {
         self.z_index = z;
         self
@@ -845,12 +958,14 @@ pub(crate) use align::{match_invisible_style, same_shape};
 /// How points travel during an interpolation.
 #[derive(Clone, Copy, Debug)]
 pub enum PathFunc {
+    /// Points move in straight lines.
     Straight,
     /// Travel along circular arcs subtending this angle (Manim's `path_arc`).
     Arc(f64),
 }
 
 impl PathFunc {
+    /// The point `t` of the way from `a` to `b` along this path.
     pub fn apply(self, a: Point, b: Point, t: f64) -> Point {
         match self {
             PathFunc::Straight => a.lerp(b, t),

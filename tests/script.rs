@@ -648,3 +648,216 @@ export class Rejoin extends Scene {
     assert_eq!(tops, 1, "the member was drawn twice");
     assert_eq!(members, ["Grouped", "Other"]);
 }
+
+fn host_for(name: &str, src: &str) -> (PathBuf, ScriptHost) {
+    let d = dir(name);
+    let p = write(&d, "s.ts", src);
+    let host = ScriptHost::load(&p, HostOptions::default()).unwrap();
+    (d, host)
+}
+
+#[test]
+fn discarded_temporaries_give_their_handles_back() {
+    // `alwaysRedraw` builds a new Text every frame and throws the old one away.
+    let (_d, host) = host_for(
+        "handles",
+        r#"
+import { Scene, ValueTracker, alwaysRedraw, Text } from "manim";
+export default class L extends Scene {
+  construct() {
+    const r = new ValueTracker(1);
+    const label = alwaysRedraw(() => Text("tick " + r.getValue().toFixed(3)));
+    this.add(label);
+    this.play(r.animate.setValue(100), { runTime: 20 });
+  }
+}
+"#,
+    );
+    host.run("L", &cfg()).unwrap();
+    assert!(host.timeline().unwrap().duration >= 20.0);
+    let live: u32 = host.eval_json("__manim_native.liveHandles()").unwrap();
+    // 300 frames each made one temporary; without release the table would hold them all.
+    assert!(live < 80, "{live} handles are still in use");
+}
+
+#[test]
+fn released_handles_do_not_break_live_groups() {
+    let (_d, host) = host_for(
+        "groups_release",
+        r#"
+import { Scene, VGroup, Circle, Square, Create } from "manim";
+export default class G extends Scene {
+  construct() {
+    const keep = Circle();
+    let g = VGroup(keep, Square());
+    for (let i = 0; i < 600; i++) { VGroup(Circle(), Square()); Circle().copy(); }   // garbage
+    g = null;                                      // the group is gone, its member `keep` lives on
+    for (let i = 0; i < 600; i++) { VGroup(Circle(), Square()); }
+    this.play(Create(keep));
+    keep.shift([1, 0, 0]);
+    this.add(VGroup(keep, Circle()));
+    this.wait(0.2);
+  }
+}
+"#,
+    );
+    host.run("G", &cfg()).unwrap();
+}
+
+#[test]
+fn deep_nesting_is_an_error_not_a_stack_overflow() {
+    let (_d, host) = host_for(
+        "deep",
+        r#"
+import { Scene, VGroup, Circle } from "manim";
+export default class D extends Scene {
+  construct() {
+    let g = VGroup(Circle());
+    for (let i = 0; i < 5000; i++) g = VGroup(g);
+    this.add(g);
+  }
+}
+"#,
+    );
+    let e = format!("{:#}", host.run("D", &cfg()).unwrap_err());
+    assert!(e.contains("nested more than"), "{e}");
+
+    let (_d, host) = host_for(
+        "deep_add",
+        r#"
+import { Scene, VGroup } from "manim";
+export default class D extends Scene {
+  construct() {
+    const root = VGroup(VGroup());
+    let cur = root.get(0);
+    for (let i = 0; i < 5000; i++) { const next = VGroup(); cur.add(next); cur = next; }
+    this.add(root);
+  }
+}
+"#,
+    );
+    let e = format!("{:#}", host.run("D", &cfg()).unwrap_err());
+    assert!(e.contains("nested more than"), "{e}");
+}
+
+#[test]
+fn mobjects_have_a_curve_budget() {
+    let (_d, host) = host_for(
+        "curves",
+        r#"
+import { Scene, Circle } from "manim";
+export default class C extends Scene {
+  construct() {
+    const c = Circle();
+    for (let i = 0; i < 40; i++) c._op("insertCurves", 10000);
+    this.add(c);
+  }
+}
+"#,
+    );
+    let e = format!("{:#}", host.run("C", &cfg()).unwrap_err());
+    assert!(e.contains("too many curves"), "{e}");
+}
+
+#[test]
+fn a_negative_tracker_index_is_an_error() {
+    let (_d, host) = host_for(
+        "tracker",
+        "import { Scene } from 'manim';\nexport default class T extends Scene { construct() { this.wait(0.1); } }\n",
+    );
+    host.run("T", &cfg()).unwrap();
+    let e = host
+        .eval_json::<String>(r#"__manim_native.beginPlay('[{"type":"ChangeValue","tracker":-1,"value":1}]')"#)
+        .unwrap_err();
+    assert!(format!("{e:#}").contains("not a value tracker"), "{e:#}");
+}
+
+const SPIN: &str =
+    "import { Scene } from 'manim';\nexport default class L extends Scene { construct() { for (;;) {} } }\n";
+
+#[test]
+fn a_cancel_set_before_a_run_is_not_lost() {
+    let (_d, host) = host_for(
+        "cancel_early",
+        "import { Scene } from 'manim';\nexport default class T extends Scene { construct() { this.wait(0.2); } }\n",
+    );
+    host.cancel_handle().store(true, std::sync::atomic::Ordering::Relaxed);
+    let e = host.run("T", &cfg()).unwrap_err();
+    assert!(e.to_string().contains("cancel"), "{e:#}");
+    // The cancel was used up: the next run goes through.
+    host.run("T", &cfg()).unwrap();
+}
+
+#[test]
+fn the_hosts_own_cancel_flag_stops_a_script_too() {
+    let (_d, host) = host_for("cancel_host", SPIN);
+    let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut c = cfg();
+    c.cancel = Some(flag.clone());
+    let setter = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(150));
+        flag.store(true, std::sync::atomic::Ordering::Relaxed);
+    });
+    let t = std::time::Instant::now();
+    assert!(host.run("L", &c).is_err());
+    setter.join().unwrap();
+    assert!(t.elapsed() < Duration::from_secs(5), "{:?}", t.elapsed());
+}
+
+#[test]
+fn the_hosts_own_deadline_stops_a_script_too() {
+    let (_d, host) = host_for("deadline_host", SPIN);
+    let mut c = cfg();
+    c.deadline =
+        Some(std::sync::Arc::new(std::sync::Mutex::new(Some(std::time::Instant::now() + Duration::from_millis(200)))));
+    let t = std::time::Instant::now();
+    assert!(host.run("L", &c).is_err());
+    assert!(t.elapsed() < Duration::from_secs(5), "{:?}", t.elapsed());
+}
+
+#[cfg(feature = "math")]
+#[test]
+fn timeout_stops_a_runaway_typst_compile() {
+    let d = dir("typst_timeout");
+    let p = write(
+        &d,
+        "t.ts",
+        r##"import { Scene, Typst } from 'manim';
+export default class T extends Scene { construct() { this.add(Typst("#let n = 0\n#for i in range(8000) { for j in range(8000) { n += 1 } }\n#n")); } }
+"##,
+    );
+    let host =
+        ScriptHost::load(&p, HostOptions { timeout: Some(Duration::from_millis(500)), ..Default::default() }).unwrap();
+    let t = std::time::Instant::now();
+    assert!(host.run("T", &cfg()).is_err(), "a runaway compile must fail");
+    assert!(t.elapsed() < Duration::from_secs(4), "took {:?}", t.elapsed());
+}
+
+#[test]
+fn a_failing_op_leaves_the_mobject_as_it_was_and_queries_read_in_place() {
+    let (_d, host) = host_for(
+        "op_errors",
+        r#"
+import { Scene, Circle, VGroup, RIGHT } from "manim";
+export default class E extends Scene {
+  construct() {
+    const g = VGroup(Circle(0.5), Circle(0.5).shift(RIGHT.mul(2)));
+    const before = g.getCenter();
+    let failed = 0;
+    try { g.setColor("not a colour"); } catch (e) { failed++; }
+    try { g.moveTo(); } catch (e) { failed++; }
+    try { (g as any).noSuchOp(); } catch (e) { failed++; }
+    const after = g.getCenter();
+    if (failed !== 3 || before.x !== after.x || g.length !== 2) throw new Error("op changed the group: " + failed);
+    // Members seen through a view stay in sync with the group, in the world or outside it.
+    g.get(0).shift(RIGHT.mul(1));
+    if (g.getCenter().x <= before.x) throw new Error("member shift did not reach the group");
+    this.add(g);
+    g.get(1).shift(RIGHT.mul(1));
+    this.wait(0.2);
+  }
+}
+"#,
+    );
+    host.run("E", &cfg()).unwrap();
+}

@@ -9,6 +9,7 @@ use std::cell::RefCell;
 use crate::color::{Color, WHITE};
 use crate::constants::DEFAULT_FONT_SIZE;
 
+/// Style applied to newly created mobjects. See the module docs for scoping.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Defaults {
     /// Stroke and fill color of new shapes.
@@ -17,6 +18,7 @@ pub struct Defaults {
     pub text_color: Color,
     /// Font family of new `Text` (empty = the system sans-serif).
     pub font: String,
+    /// Font size of new `Text`, in points.
     pub font_size: f64,
     /// Fonts tried, in order, for characters the chosen font lacks.
     pub fallback_fonts: Vec<String>,
@@ -46,10 +48,12 @@ pub fn color() -> Color {
     CURRENT.with(|d| d.borrow().color)
 }
 
+/// A copy of this thread's current defaults.
 pub fn get() -> Defaults {
     CURRENT.with(|d| d.borrow().clone())
 }
 
+/// Replace this thread's defaults.
 pub fn set(defaults: Defaults) {
     CURRENT.with(|d| *d.borrow_mut() = defaults);
 }
@@ -59,6 +63,7 @@ pub fn update(f: impl FnOnce(&mut Defaults)) {
     CURRENT.with(|d| f(&mut d.borrow_mut()));
 }
 
+/// Restore the built-in defaults on this thread.
 pub fn reset() {
     set(Defaults::default());
 }

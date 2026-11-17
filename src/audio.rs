@@ -8,16 +8,26 @@ use std::sync::Arc;
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
 
+/// Where a sound's audio comes from.
 #[derive(Clone, Debug)]
 pub enum AudioSource {
     /// Any format ffmpeg reads (wav, mp3, ogg, flac, m4a...).
     File(PathBuf),
     /// Interleaved float samples in -1..1 (e.g. straight from a TTS model).
-    Samples { data: Arc<[f32]>, sample_rate: u32, channels: u16 },
+    Samples {
+        /// Interleaved samples.
+        data: Arc<[f32]>,
+        /// Samples per second, per channel.
+        sample_rate: u32,
+        /// Number of interleaved channels.
+        channels: u16,
+    },
 }
 
+/// An audio clip placed on the scene timeline.
 #[derive(Clone, Debug)]
 pub struct Sound {
+    /// The audio to play.
     pub source: AudioSource,
     /// Scene time in seconds when it starts.
     pub start: f64,
@@ -36,6 +46,7 @@ impl Sound {
         }
     }
 
+    /// Short description of the source, for logs and events.
     pub fn describe(&self) -> String {
         match &self.source {
             AudioSource::File(p) => p.display().to_string(),
@@ -47,9 +58,13 @@ impl Sound {
 /// Serializable summary of a sound (for timelines and events).
 #[derive(Clone, Debug, Serialize)]
 pub struct SoundInfo {
+    /// File path, or a short description for raw samples.
     pub source: String,
+    /// Scene time in seconds when the sound starts.
     pub start: f64,
+    /// Linear gain (1 = unchanged).
     pub gain: f64,
+    /// Length in seconds, when known without decoding (raw samples only).
     pub duration: Option<f64>,
 }
 
@@ -103,8 +118,7 @@ pub fn mux(ffmpeg: &Path, video: &Path, sounds: &[Sound]) -> Result<()> {
     let tmp_dir = video.with_extension(format!("audio-tmp-{}-{n}", std::process::id()));
     std::fs::create_dir_all(&tmp_dir)?;
     let result = (|| -> Result<()> {
-        let mut cmd = crate::output::tool_command(ffmpeg);
-        cmd.args(["-y", "-loglevel", "error", "-i"]).arg(crate::output::ffmpeg_path_arg(video));
+        let mut input_files = Vec::new();
         let mut filters = Vec::new();
         for (i, s) in sounds.iter().enumerate() {
             let input = match &s.source {
@@ -120,7 +134,7 @@ pub fn mux(ffmpeg: &Path, video: &Path, sounds: &[Sound]) -> Result<()> {
                     p
                 }
             };
-            cmd.arg("-i").arg(crate::output::ffmpeg_path_arg(&input));
+            input_files.push(input);
             let ms = (s.start.max(0.0) * 1000.0).round() as u64;
             filters.push(format!(
                 "[{}:a]aformat=sample_rates=48000:channel_layouts=stereo,adelay={ms}|{ms},volume={:.4}[a{i}]",
@@ -131,13 +145,30 @@ pub fn mux(ffmpeg: &Path, video: &Path, sounds: &[Sound]) -> Result<()> {
         let inputs: String = (0..sounds.len()).map(|i| format!("[a{i}]")).collect();
         filters.push(format!("{inputs}amix=inputs={}:normalize=0:dropout_transition=0,apad[aout]", sounds.len()));
         let out = video.with_extension("muxing.mp4");
-        cmd.arg("-filter_complex")
-            .arg(filters.join(";"))
-            .args(["-map", "0:v", "-map", "[aout]", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest"])
-            .args(["-movflags", "+faststart"])
-            .arg(crate::output::ffmpeg_path_arg(&out))
-            .stdin(Stdio::null());
-        let res = cmd.output().with_context(|| format!("running {}", ffmpeg.display()))?;
+        // The graph grows with every sound; a file keeps the command line short (Windows
+        // refuses ~32k characters).
+        let script = tmp_dir.join("filters.txt");
+        std::fs::write(&script, filters.join(";\n")).with_context(|| format!("writing {}", script.display()))?;
+        // `-/filter_complex FILE` is the current spelling (ffmpeg 7+); older builds only
+        // know `-filter_complex_script`.
+        let run = |flag: &str| {
+            let mut cmd = crate::output::tool_command(ffmpeg);
+            cmd.args(["-y", "-loglevel", "error", "-i"]).arg(crate::output::ffmpeg_path_arg(video));
+            for f in &input_files {
+                cmd.arg("-i").arg(crate::output::ffmpeg_path_arg(f));
+            }
+            cmd.arg(flag)
+                .arg(&script)
+                .args(["-map", "0:v", "-map", "[aout]", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest"])
+                .args(["-movflags", "+faststart"])
+                .arg(crate::output::ffmpeg_path_arg(&out))
+                .stdin(Stdio::null());
+            cmd.output().with_context(|| format!("running {}", ffmpeg.display()))
+        };
+        let mut res = run("-/filter_complex")?;
+        if !res.status.success() && String::from_utf8_lossy(&res.stderr).contains("Unrecognized option") {
+            res = run("-filter_complex_script")?;
+        }
         if !res.status.success() {
             let _ = std::fs::remove_file(&out);
             bail!("ffmpeg could not add the audio: {}", String::from_utf8_lossy(&res.stderr).trim());

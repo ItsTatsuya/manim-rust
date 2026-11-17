@@ -16,6 +16,7 @@ use crate::mobject::{Subpath, VMobject};
 /// Stroke-width unit: SVG user units → Manim stroke width (1 = 0.01 scene units).
 const STROKE_UNITS: f64 = 100.0;
 
+/// Namespace for constructing SVG mobjects; the constructors return a [`VMobject`].
 pub struct SVGMobject;
 
 impl SVGMobject {
@@ -34,6 +35,7 @@ impl SVGMobject {
         Self::from_data(svg.as_bytes())
     }
 
+    /// Parse SVG bytes, scaled to 2 units tall and centered.
     pub fn from_data(data: &[u8]) -> Result<VMobject> {
         Self::from_data_height(data, 2.0)
     }
@@ -61,9 +63,18 @@ fn load(data: &[u8]) -> Result<usvg::Tree> {
     usvg::Tree::from_data(data, &opt).context("parsing SVG")
 }
 
+/// With the `text` feature the SVG parser uses text's font database (the same `fontdb`
+/// as usvg's): system fonts are scanned once and registered fonts are seen by both.
+#[cfg(feature = "text")]
+fn svg_fonts() -> std::sync::Arc<usvg::fontdb::Database> {
+    crate::text::shared_fontdb()
+}
+
+#[cfg(not(feature = "text"))]
 static SVG_FONTS: std::sync::Mutex<Option<std::sync::Arc<usvg::fontdb::Database>>> = std::sync::Mutex::new(None);
 
-/// System fonts plus fonts registered through `text::register_font_*`, scanned once.
+/// System fonts, scanned once (without `text` there is nothing to register fonts with).
+#[cfg(not(feature = "text"))]
 fn svg_fonts() -> std::sync::Arc<usvg::fontdb::Database> {
     let mut g = SVG_FONTS.lock().unwrap_or_else(|e| e.into_inner());
     g.get_or_insert_with(|| {
@@ -72,14 +83,6 @@ fn svg_fonts() -> std::sync::Arc<usvg::fontdb::Database> {
         std::sync::Arc::new(db)
     })
     .clone()
-}
-
-/// Make a registered font available to SVG `<text>` too.
-#[allow(dead_code)]
-pub(crate) fn register_font_data(bytes: Vec<u8>) {
-    let mut db = svg_fonts();
-    std::sync::Arc::make_mut(&mut db).load_font_data(bytes);
-    *SVG_FONTS.lock().unwrap_or_else(|e| e.into_inner()) = Some(db);
 }
 
 fn from_tree(tree: &usvg::Tree, scale: f64) -> VMobject {
@@ -193,14 +196,6 @@ fn path(p: &usvg::Path, scale: f64, opacity: f64) -> Option<VMobject> {
         m.stroke_color = m.fill_color;
     }
     Some(m)
-}
-
-/// Make a registered font folder available to SVG `<text>` too.
-#[allow(dead_code)]
-pub(crate) fn register_font_dir(path: &std::path::Path) {
-    let mut db = svg_fonts();
-    std::sync::Arc::make_mut(&mut db).load_fonts_dir(path);
-    *SVG_FONTS.lock().unwrap_or_else(|e| e.into_inner()) = Some(db);
 }
 
 #[cfg(test)]

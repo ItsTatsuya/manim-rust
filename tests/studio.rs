@@ -47,9 +47,9 @@ fn seeking_reproduces_frames() {
         let x = w.value(tracker);
         w.modify(dot, |m| m.move_to(pt(x, -2.0)));
     });
-    expected.push((s.time(), s.render_frame()));
     s.play((sq.animate(|m| m.shift(RIGHT * 2.0).rotate(0.7)), ChangeValue::new(tracker, 3.0)));
-    expected.push((s.time(), s.render_frame()));
+    // The last frame of a play is the one at (end - 1 frame): seeking maps times to exported frames.
+    expected.push((s.time() - 1.0 / 15.0, s.render_frame()));
     // Capture a frame in the middle of a play by driving it frame by frame.
     let c = s.insert(Circle::new(1.0).set_fill(RED, 0.5));
     let mut p = s.begin_play(LaggedStart::new(anims![FadeIn::new(c), Create::new(sq)]).run_time(2.0));
@@ -58,16 +58,46 @@ fn seeking_reproduces_frames() {
         s.end_frame(&p, dt);
         k += 1;
         if k == 11 {
-            expected.push((s.time(), s.render_frame()));
+            // The frame exported after 11 steps is video frame 10, at 10 / fps.
+            expected.push((s.time() - 1.0 / 15.0, s.render_frame()));
         }
     }
     s.wait(0.4);
     s.play(FadeOut::new(c));
-    expected.push((s.time(), s.render_frame()));
+    expected.push((s.time() - 1.0 / 15.0, s.render_frame()));
     // Jump around out of order.
     for (t, frame) in expected.iter().rev().chain(expected.iter()) {
         s.seek(*t).unwrap();
-        assert!(s.render_frame() == *frame, "frame at t={t} differs after seeking");
+        assert!(s.render_frame() == *frame, "frame at t={t:.4} differs after seeking");
+    }
+}
+
+/// `frame_at(k / fps)` is exactly video frame `k` (checked against a PNG sequence export).
+#[test]
+fn frame_at_matches_exported_frames() {
+    let dir = std::env::temp_dir().join(format!("manim-studio-frames-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut c = recorded();
+    c.dry_run = false;
+    c.write_video = true;
+    c.format = OutputFormat::Png;
+    c.renderer = RendererKind::Skia;
+    c.pixel_width = 160;
+    c.pixel_height = 90;
+    c.fps = 10.0;
+    c.media_dir = dir.clone();
+    let mut s = Scene::new(&c, "Frames").unwrap();
+    let sq = s.add(Square::new(1.5).set_fill(BLUE, 0.6));
+    s.play(sq.animate(|m| m.shift(RIGHT * 2.0).rotate(0.7)).run_time(1.0));
+    s.wait(0.5);
+    s.play(FadeOut::new(sq).run_time(0.5));
+    let frames = (s.duration() * 10.0).round() as usize;
+    s.finish(std::time::Instant::now()).unwrap();
+    let base = c.video_base("Frames");
+    for k in [0, 1, 4, 9, 10, 12, 15, frames - 1] {
+        let png = image::open(base.join(format!("frame_{k:05}.png"))).unwrap().to_rgba8();
+        let seeked = s.frame_at(k as f64 / 10.0).unwrap();
+        assert!(png.as_raw() == &seeked, "frame_at({k}/10) differs from exported frame {k}");
     }
 }
 
@@ -158,7 +188,8 @@ fn overlay_draws_on_top_and_survives_clear() {
 fn images_render_and_transform() {
     let (w, h) = (4u32, 4u32);
     let px: Vec<u8> = (0..w * h).flat_map(|_| [0u8, 200, 0, 255]).collect();
-    let img = ImageMobject::from_rgba(w, h, px).set_height(4.0);
+    let img = ImageMobject::from_rgba(w, h, px).unwrap().set_height(4.0);
+    assert!(ImageMobject::from_rgba(w, h, vec![0; 7]).is_err(), "wrong buffer size is an error, not a panic");
     assert!((img.height() - 4.0).abs() < 1e-9);
     let mut s = Scene::new(&cfg(), "Img").unwrap();
     let id = s.add(img);

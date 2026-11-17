@@ -36,6 +36,7 @@ const BRACKET_HEIGHT: f64 = 0.5977;
 /// A matrix of mobjects between brackets.
 #[derive(Clone, Debug)]
 pub struct Matrix {
+    /// The cells, row by row.
     pub entries: Vec<Vec<VMobject>>,
     /// Distance between row anchors (default 0.8).
     pub v_buff: f64,
@@ -49,12 +50,15 @@ pub struct Matrix {
     pub element_alignment_corner: Point,
     /// `"["`, `"("`, `"{"`, `"|"`, `"||"`, `"<"` (or `\langle`), `"."` for none.
     pub left_bracket: String,
+    /// Right bracket; same vocabulary as `left_bracket`.
     pub right_bracket: String,
     /// Fit the brackets to the entries' height (default on); off rounds up to TeX's steps.
     pub stretch_brackets: bool,
     /// Bracket color (default: the default text color).
     pub bracket_color: Option<Color>,
+    /// Put a 75%-opaque rectangle behind each entry.
     pub add_background_rectangles_to_entries: bool,
+    /// Put a 75%-opaque rectangle behind the whole matrix.
     pub include_background_rectangle: bool,
 }
 
@@ -114,22 +118,27 @@ impl Matrix {
         )
     }
 
+    /// Set the distance between row anchors.
     pub fn v_buff(mut self, b: f64) -> Self {
         self.v_buff = b;
         self
     }
+    /// Set the distance between column anchors.
     pub fn h_buff(mut self, b: f64) -> Self {
         self.h_buff = b;
         self
     }
+    /// Set the gap between the entries and each bracket.
     pub fn bracket_h_buff(mut self, b: f64) -> Self {
         self.bracket_h_buff = b;
         self
     }
+    /// Set how far the brackets reach above and below the entries.
     pub fn bracket_v_buff(mut self, b: f64) -> Self {
         self.bracket_v_buff = b;
         self
     }
+    /// Set which corner of each entry sits on its grid anchor.
     pub fn element_alignment_corner(mut self, corner: Point) -> Self {
         self.element_alignment_corner = corner;
         self
@@ -140,18 +149,22 @@ impl Matrix {
         self.right_bracket = right.into();
         self
     }
+    /// Fit brackets to the entries' height, or round up to TeX's steps.
     pub fn stretch_brackets(mut self, on: bool) -> Self {
         self.stretch_brackets = on;
         self
     }
+    /// Set the bracket color.
     pub fn bracket_color(mut self, c: Color) -> Self {
         self.bracket_color = Some(c);
         self
     }
+    /// Put a translucent rectangle behind each entry (or not).
     pub fn add_background_rectangles_to_entries(mut self, on: bool) -> Self {
         self.add_background_rectangles_to_entries = on;
         self
     }
+    /// Put a translucent rectangle behind the whole matrix (or not).
     pub fn include_background_rectangle(mut self, on: bool) -> Self {
         self.include_background_rectangle = on;
         self

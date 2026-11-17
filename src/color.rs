@@ -4,17 +4,23 @@
 /// so `a` is normally 1.0.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Color {
+    /// Red, in `[0, 1]`.
     pub r: f32,
+    /// Green, in `[0, 1]`.
     pub g: f32,
+    /// Blue, in `[0, 1]`.
     pub b: f32,
+    /// Alpha, in `[0, 1]`.
     pub a: f32,
 }
 
 impl Color {
+    /// Opaque color from red, green and blue components in `[0, 1]`.
     pub const fn rgb(r: f32, g: f32, b: f32) -> Self {
         Color { r, g, b, a: 1.0 }
     }
 
+    /// Color from red, green, blue and alpha components in `[0, 1]`.
     pub const fn rgba(r: f32, g: f32, b: f32, a: f32) -> Self {
         Color { r, g, b, a }
     }
@@ -43,6 +49,7 @@ impl Color {
         }
     }
 
+    /// Linear interpolation towards `other` (`t = 0` gives `self`, `t = 1` gives `other`), alpha included.
     pub fn lerp(self, other: Color, t: f64) -> Color {
         // a·(1−t) + b·t is exact at both ends (a + (b−a)·t is not at t = 1).
         let (t, u) = (t as f32, 1.0 - t as f32);
@@ -54,14 +61,21 @@ impl Color {
         }
     }
 
+    /// The same color with alpha replaced by `a`.
     pub fn with_alpha(self, a: f32) -> Color {
         Color { a, ..self }
     }
 
-    /// RGBA with an extra opacity factor applied, clamped to [0, 1].
+    /// RGBA with an extra opacity factor applied, clamped to [0, 1]. A color with a NaN or
+    /// infinite component (a broken animation) becomes fully transparent, so both
+    /// rasterizers draw nothing for it instead of black or garbage.
     pub fn to_array(self, opacity: f64) -> [f32; 4] {
+        let a = self.a * opacity as f32;
+        if ![self.r, self.g, self.b, a].iter().all(|v| v.is_finite()) {
+            return [0.0; 4];
+        }
         let c = |v: f32| v.clamp(0.0, 1.0);
-        [c(self.r), c(self.g), c(self.b), c(self.a * opacity as f32)]
+        [c(self.r), c(self.g), c(self.b), c(a)]
     }
 }
 
@@ -84,7 +98,10 @@ pub fn color_gradient(colors: &[Color], n: usize) -> Vec<Color> {
 
 macro_rules! palette {
     ($($name:ident = $hex:literal),* $(,)?) => {
-        $(pub const $name: Color = Color::from_hex($hex);)*
+        $(
+            #[doc = concat!("Manim palette color `", stringify!($name), "` (", stringify!($hex), ").")]
+            pub const $name: Color = Color::from_hex($hex);
+        )*
     };
 }
 
@@ -105,16 +122,29 @@ palette! {
     PURE_CYAN = 0x00FFFF, PURE_MAGENTA = 0xFF00FF, PURE_YELLOW = 0xFFFF00,
 }
 
+/// Alias for [`GRAY_C`].
 pub const GRAY: Color = GRAY_C;
+/// Alias for [`GRAY_C`].
 pub const GREY: Color = GRAY_C;
+/// Alias for [`GRAY_B`].
 pub const LIGHT_GRAY: Color = GRAY_B;
+/// Alias for [`GRAY_D`].
 pub const DARK_GRAY: Color = GRAY_D;
+/// Alias for [`BLUE_C`].
 pub const BLUE: Color = BLUE_C;
+/// Alias for [`BLUE_E`].
 pub const DARK_BLUE: Color = BLUE_E;
+/// Alias for [`TEAL_C`].
 pub const TEAL: Color = TEAL_C;
+/// Alias for [`GREEN_C`].
 pub const GREEN: Color = GREEN_C;
+/// Alias for [`YELLOW_C`].
 pub const YELLOW: Color = YELLOW_C;
+/// Alias for [`GOLD_C`].
 pub const GOLD: Color = GOLD_C;
+/// Alias for [`RED_C`].
 pub const RED: Color = RED_C;
+/// Alias for [`MAROON_C`].
 pub const MAROON: Color = MAROON_C;
+/// Alias for [`PURPLE_C`].
 pub const PURPLE: Color = PURPLE_C;

@@ -10,9 +10,10 @@ use std::path::PathBuf;
 use anyhow::{bail, Context, Result};
 
 use crate::color::{Color, BLACK};
-use crate::output::{Encoder, OutputFormat};
+use crate::output::{Encoder, OutputFormat, X264Options};
 use crate::renderer::RendererKind;
 
+/// Preset output sizes and frame rates, as in Manim's `-ql` ... `-qk` flags.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Quality {
     /// 854x480 @ 15 fps (`-ql`)
@@ -28,6 +29,7 @@ pub enum Quality {
 }
 
 impl Quality {
+    /// `(pixel_width, pixel_height, fps)` for this preset.
     pub fn settings(self) -> (u32, u32, f64) {
         match self {
             Quality::Low => (854, 480, 15.0),
@@ -50,15 +52,27 @@ impl Quality {
     }
 }
 
+/// Everything a render needs besides the scene itself. Start from [`Config::default`] (1080p60) and override fields; [`Config::parse`] fills it from command-line style arguments.
 #[derive(Clone, Debug)]
 pub struct Config {
+    /// Frame width in pixels.
     pub pixel_width: u32,
+    /// Frame height in pixels.
+    /// Output format; [`OutputFormat::Auto`] picks MP4 when ffmpeg is available, else GIF.
     pub pixel_height: u32,
+    /// Frames per second.
     pub fps: f64,
+    /// Frame background. Frames are always opaque: the alpha of this color is ignored.
     pub background: Color,
+    /// Which rasterizer to use.
     pub renderer: RendererKind,
+    /// Output container (MP4, GIF or PNG sequence), or chosen from the extension.
     pub format: OutputFormat,
+    /// Video encoder for MP4 output.
     pub encoder: Encoder,
+    /// Preset and CRF used when the encoder is x264 (default `fast`, CRF 18).
+    pub x264: X264Options,
+    /// Root of the `media/` output tree (default `media`).
     pub media_dir: PathBuf,
     /// Write output here instead of the `media/` tree. A directory (existing, or a path
     /// without an extension) gets `<Scene>.<ext>`; a file path is used as-is with the
@@ -66,9 +80,11 @@ pub struct Config {
     pub output: Option<PathBuf>,
     /// Write the animation (off with `-s`, which only saves the last frame).
     pub write_video: bool,
+    /// Save the last frame as a PNG (`-s`).
     pub save_last_frame: bool,
     /// Print GPU adapters and exit.
     pub gpu_info: bool,
+    /// Suppress progress output (`--quiet`).
     pub quiet: bool,
     /// Run the scene logic only: nothing is rasterized or written (fast checks, previews).
     pub dry_run: bool,
@@ -97,6 +113,12 @@ pub struct Config {
     pub deadline: Option<Deadline>,
     /// ffmpeg executable to use (otherwise `MANIM_FFMPEG`, PATH, then winget's folder).
     pub ffmpeg: Option<PathBuf>,
+    /// A second cancel flag and deadline, honoured next to [`Config::cancel`] and
+    /// [`Config::deadline`] (any of them stops the render). `ScriptHost` fills these with
+    /// its own, so a host's flags and the script's never overwrite each other.
+    pub script_cancel: Option<Arc<AtomicBool>>,
+    /// Deadline counterpart of [`Config::script_cancel`].
+    pub script_deadline: Option<Deadline>,
 }
 
 /// A shared, adjustable time limit (see [`Config::deadline`]).
@@ -117,15 +139,20 @@ impl Config {
         if !(self.fps.is_finite() && self.fps > 0.0 && self.fps <= 1000.0) {
             bail!("fps must be a number between 0 and 1000 (got {})", self.fps);
         }
+        self.x264.validate()?;
         Ok(())
     }
 
     /// Whether the render was cancelled or ran past its deadline.
     pub fn interrupted(&self) -> bool {
-        self.cancel.as_ref().is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed))
-            || self.deadline.as_ref().is_some_and(|d| {
+        let cancelled =
+            |c: &Option<Arc<AtomicBool>>| c.as_ref().is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed));
+        let late = |d: &Option<Deadline>| {
+            d.as_ref().is_some_and(|d| {
                 d.lock().unwrap_or_else(|e| e.into_inner()).is_some_and(|t| std::time::Instant::now() > t)
             })
+        };
+        cancelled(&self.cancel) || late(&self.deadline) || cancelled(&self.script_cancel) || late(&self.script_deadline)
     }
 }
 
@@ -167,6 +194,7 @@ impl Default for Config {
             renderer: RendererKind::Auto,
             format: OutputFormat::Auto,
             encoder: Encoder::Auto,
+            x264: X264Options::default(),
             media_dir: PathBuf::from("media"),
             output: None,
             write_video: true,
@@ -186,10 +214,13 @@ impl Default for Config {
             cancel: None,
             deadline: None,
             ffmpeg: None,
+            script_cancel: None,
+            script_deadline: None,
         }
     }
 }
 
+/// Usage text for the options [`Config::parse`] understands.
 pub const HELP: &str = "\
 Options:
   -ql, -qm, -qh, -qp, -qk   Quality: 480p15, 720p30, 1080p60 (default), 1440p60, 2160p60
@@ -202,6 +233,8 @@ Options:
   --encoder auto|x264|nvenc|qsv|amf
                             MP4 encoder (default auto: first working hardware encoder,
                             else x264)
+  --x264-preset NAME        x264 speed/size trade-off: ultrafast..veryslow (default fast)
+  --crf N                   x264 quality, 0-51, lower is better (default 18)
   --fps N                   Override frame rate
   -r, --resolution WxH      Override resolution (e.g. 1280x720 or 1280,720)
   --media_dir DIR           Output root (default ./media)
@@ -224,6 +257,7 @@ Options:
   -h, --help                Show this help";
 
 impl Config {
+    /// Apply a [`Quality`] preset to the size and frame rate.
     pub fn quality(mut self, q: Quality) -> Self {
         let (w, h, fps) = q.settings();
         self.pixel_width = w;
@@ -244,6 +278,7 @@ impl Config {
         Ok(c)
     }
 
+    /// Parse command-line style arguments (without the program name) into a `Config`. Unknown options and bad values are errors.
     pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Self> {
         let mut c = Config::default();
         let mut it = args.into_iter();
@@ -259,6 +294,8 @@ impl Config {
                 "--renderer" => c.renderer = val("--renderer")?.parse()?,
                 "--format" => c.format = val("--format")?.parse()?,
                 "--encoder" => c.encoder = val("--encoder")?.parse()?,
+                "--x264-preset" => c.x264.preset = val("--x264-preset")?,
+                "--crf" => c.x264.crf = val("--crf")?.parse().context("--crf must be a number from 0 to 51")?,
                 "--fps" => c.fps = val("--fps")?.parse().context("--fps must be a number")?,
                 "-r" | "--resolution" => {
                     let v = val("--resolution")?;
@@ -323,6 +360,7 @@ impl Config {
         }
     }
 
+    /// Directory name of the quality tier, e.g. `1080p60`.
     pub fn quality_dir(&self) -> String {
         format!("{}p{}", self.pixel_height, self.fps)
     }

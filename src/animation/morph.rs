@@ -104,6 +104,7 @@ impl Morph {
     }
 }
 
+/// Namespace for [`Transform`]-style morphs: change a mobject into a target shape.
 pub struct Transform;
 impl Transform {
     /// Morph `id` into `target`. `id` takes `target`'s shape afterwards.
@@ -113,6 +114,7 @@ impl Transform {
     }
 }
 
+/// Namespace for `ReplacementTransform`: morph one mobject into another, which then takes its place.
 pub struct ReplacementTransform;
 impl ReplacementTransform {
     /// Morph `a` into the (not yet displayed) mobject `b`; `a` is then replaced by `b` in the scene.
@@ -122,6 +124,7 @@ impl ReplacementTransform {
     }
 }
 
+/// Namespace for `TransformFromCopy`: morph a copy, leaving the original in place.
 pub struct TransformFromCopy;
 impl TransformFromCopy {
     /// A copy of `a` morphs into `b`; `a` stays put.
@@ -131,6 +134,7 @@ impl TransformFromCopy {
     }
 }
 
+/// Namespace for `FadeTransform`: cross-fade between two mobjects.
 pub struct FadeTransform;
 impl FadeTransform {
     /// Cross-fade `a` into `b`: `a` stretches onto `b`'s box while fading out, `b` grows
@@ -142,6 +146,7 @@ impl FadeTransform {
     }
 }
 
+/// Namespace for `TransformMatchingShapes`: match same-shaped pieces and morph them.
 pub struct TransformMatchingShapes;
 impl TransformMatchingShapes {
     /// Pieces of `a` with the same shape as pieces of `b` (the same glyph, at any size)
@@ -152,6 +157,7 @@ impl TransformMatchingShapes {
     }
 }
 
+/// Namespace for `TransformMatchingTex`: [`TransformMatchingShapes`] for equations.
 pub struct TransformMatchingTex;
 impl TransformMatchingTex {
     /// [`TransformMatchingShapes`] for equations. Manim CE matches by TeX substring; here
@@ -163,38 +169,47 @@ impl TransformMatchingTex {
     }
 }
 
+/// Namespace for fading a mobject in.
 pub struct FadeIn;
 impl FadeIn {
+    /// Fade `id` in (also scale or shift with the returned [`Morph`]'s builders).
     #[allow(clippy::new_ret_no_self)]
     pub fn new(id: MobjectId) -> Morph {
         Morph::make(id, Kind::FadeIn, "FadeIn")
     }
 }
 
+/// Namespace for fading a mobject out and removing it.
 pub struct FadeOut;
 impl FadeOut {
+    /// Fade `id` out, then take it off the scene.
     #[allow(clippy::new_ret_no_self)]
     pub fn new(id: MobjectId) -> Morph {
         Morph::make(id, Kind::FadeOut, "FadeOut")
     }
 }
 
+/// Namespace for growing a mobject from its center.
 pub struct GrowFromCenter;
 impl GrowFromCenter {
+    /// Grow `id` from its center.
     #[allow(clippy::new_ret_no_self)]
     pub fn new(id: MobjectId) -> Morph {
         Morph::make(id, Kind::Grow(None), "GrowFromCenter")
     }
 }
 
+/// Namespace for growing a mobject from a point.
 pub struct GrowFromPoint;
 impl GrowFromPoint {
+    /// Grow `id` from `point`.
     #[allow(clippy::new_ret_no_self)]
     pub fn new(id: MobjectId, point: Point) -> Morph {
         Morph::make(id, Kind::Grow(Some(point)), "GrowFromPoint")
     }
 }
 
+/// Namespace for growing a mobject from one of its edges.
 pub struct GrowFromEdge;
 impl GrowFromEdge {
     /// Grow out of the `edge` side (`LEFT` sweeps a highlight in left to right).
@@ -204,22 +219,27 @@ impl GrowFromEdge {
     }
 }
 
+/// Namespace for growing a mobject from its center while spinning.
 pub struct SpinInFromNothing;
 impl SpinInFromNothing {
+    /// Grow `id` from its center along a quarter-turn arc.
     #[allow(clippy::new_ret_no_self)]
     pub fn new(id: MobjectId) -> Morph {
         Morph::make(id, Kind::Grow(None), "SpinInFromNothing").path_arc(PI / 2.0)
     }
 }
 
+/// Namespace for shrinking a mobject to its center.
 pub struct ShrinkToCenter;
 impl ShrinkToCenter {
+    /// Shrink `id` to its center, then take it off the scene.
     #[allow(clippy::new_ret_no_self)]
     pub fn new(id: MobjectId) -> Morph {
         Morph::make(id, Kind::Shrink, "ShrinkToCenter")
     }
 }
 
+/// Namespace for briefly highlighting a mobject.
 pub struct Indicate;
 impl Indicate {
     /// Briefly scale up and turn yellow.
@@ -227,6 +247,7 @@ impl Indicate {
     pub fn new(id: MobjectId) -> Morph {
         Self::with(id, 1.2, YELLOW)
     }
+    /// Scale `id` by `scale` and tint it `color`, then return to normal.
     pub fn with(id: MobjectId, scale: f64, color: Color) -> Morph {
         let mut m = Morph::make(id, Kind::Indicate(scale, color), "Indicate");
         m.cfg.rate_func = rate_functions::there_and_back;
@@ -247,6 +268,16 @@ impl Animation for Morph {
 
     fn name(&self) -> String {
         self.name.into()
+    }
+
+    fn validate(&self, w: &World) -> anyhow::Result<()> {
+        w.try_get(self.id)?;
+        match &self.kind {
+            Kind::Replacement(b) | Kind::FromCopy(b) | Kind::FadeTransform(b) => w.try_get(*b)?,
+            Kind::Matching { to, .. } => w.try_get(*to)?,
+            _ => return Ok(()),
+        };
+        Ok(())
     }
 
     fn begin(&mut self, w: &mut World) {

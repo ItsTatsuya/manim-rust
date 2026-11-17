@@ -4,7 +4,7 @@ mod common;
 
 use manim::prelude::*;
 use manim::renderer::cpu::{rasterize, CpuRenderer, Raster};
-use manim::renderer::{DisplayList, Renderer};
+use manim::renderer::{DisplayList, DrawPath, Layer, PxSubpath, Renderer};
 
 const W: u32 = 160;
 const H: u32 = 90;
@@ -209,4 +209,126 @@ fn gpu_odd_size() {
         let wrong = Camera::new(50, 50).display_list(&world);
         assert!(g.render_batch(&[&wrong]).is_err(), "size mismatch is an error, not a panic");
     }
+}
+
+#[test]
+fn frames_are_opaque_even_with_a_translucent_background() {
+    let mut cam = Camera::new(W, H);
+    cam.background = Color::rgba(0.2, 0.4, 0.6, 0.3);
+    let dl = cam.display_list(&World::new());
+    assert_eq!(dl.background[3], 1.0);
+    for buf in [rasterize(&dl), CpuRenderer::with_raster(Raster::Vello).render_batch(&[&dl]).unwrap().remove(0)] {
+        assert!(buf.chunks(4).all(|p| p[3] == 255 && p[2] > 140 && p[2] < 165), "opaque, unmultiplied bg");
+    }
+}
+
+#[test]
+fn non_finite_colors_draw_nothing_in_both_rasterizers() {
+    let bad = Circle::new(2.0).set_fill(Color::rgba(f32::NAN, 0.5, 0.5, 1.0), 1.0).set_stroke_width(0.0);
+    let mut worse = Square::new(2.0).set_fill(RED, f64::NAN);
+    worse.stroke_opacity = f64::INFINITY;
+    let mut dl = frame(vec![bad, worse]);
+    dl.background = [0.2, 0.4, 0.6, 1.0]; // not black, so a black fill would show
+    let a = rasterize(&dl);
+    let bg = [51, 102, 153, 255];
+    let b = CpuRenderer::with_raster(Raster::Vello).render_batch(&[&dl]).unwrap().remove(0);
+    for (name, buf) in [("tiny-skia", a), ("vello", b)] {
+        assert!(
+            buf.chunks(4).all(|p| p.iter().zip(bg).all(|(a, b)| a.abs_diff(b) <= 1)),
+            "{name}: broken colors must not paint (not even black)"
+        );
+    }
+}
+
+#[test]
+fn pooled_buffers_are_fully_overwritten() {
+    use manim::renderer::FramePool;
+    // A recycled buffer full of junk must produce the same frame as a fresh one, for both
+    // rasterizers and with or without a background layer.
+    let mut with_layer = frame(vec![Circle::new(2.0).set_fill(RED, 0.5)]);
+    let layer = DrawPath {
+        subpaths: vec![PxSubpath {
+            start: [0.0, 0.0],
+            curves: vec![[[10.0, 0.0], [20.0, 5.0], [30.0, 30.0]]],
+            closed: true,
+        }],
+        fill: Some([0.0, 0.5, 0.0, 1.0]),
+        stroke: None,
+        image: None,
+        nonzero: true,
+    };
+    with_layer.background_layer = Some(Layer(std::sync::Arc::new(vec![layer])));
+    for dl in [frame(vec![Circle::new(2.0).set_fill(RED, 0.5)]), with_layer] {
+        let mut kinds = vec![Raster::Skia];
+        #[cfg(feature = "vello")]
+        kinds.push(Raster::Vello);
+        for raster in kinds {
+            let want = CpuRenderer::with_raster(raster).render_batch(&[&dl]).unwrap().remove(0);
+            let pool = FramePool::new();
+            pool.put(vec![0xAB; (W * H * 4) as usize]);
+            let mut r = CpuRenderer::with_raster(raster);
+            r.use_pool(pool.clone());
+            assert_eq!(pool.idle(), 1);
+            let got = r.render_batch(&[&dl]).unwrap().remove(0);
+            assert_eq!(pool.idle(), 0, "the dirty buffer was reused");
+            assert!(got == want, "{raster:?}: pooled frame differs from a fresh one");
+        }
+    }
+}
+
+#[test]
+fn gpu_background_layer_is_cached_and_matches_cpu() {
+    #[cfg(feature = "gpu")]
+    {
+        // 64 is a multiple of 64 pixels: rows are not padded, which takes the single-copy readback.
+        for (w, h) in [(64u32, 36u32), (W, H)] {
+            let Ok(mut g) = manim::renderer::gpu::GpuRenderer::new(w, h, false) else { return };
+            let layer = std::sync::Arc::new(vec![DrawPath {
+                subpaths: vec![PxSubpath {
+                    start: [4.0, 4.0],
+                    curves: vec![[[30.0, 4.0], [30.0, 4.0], [30.0, 30.0]], [[30.0, 30.0], [4.0, 30.0], [4.0, 4.0]]],
+                    closed: true,
+                }],
+                fill: Some([0.1, 0.6, 0.2, 1.0]),
+                stroke: None,
+                image: None,
+                nonzero: true,
+            }]);
+            let mut world = World::new();
+            let id = world.insert(Circle::new(2.0).set_fill(RED, 0.7));
+            world.show(id);
+            let mut dl = Camera::new(w, h).display_list(&world);
+            dl.background_layer = Some(Layer(layer.clone()));
+            let moving: Vec<DisplayList> = (0..40)
+                .map(|i| {
+                    let mut d = dl.clone();
+                    for item in &mut d.items {
+                        for sp in &mut item.subpaths {
+                            sp.start[0] += i as f32 * 0.5;
+                            for c in &mut sp.curves {
+                                for p in c.iter_mut() {
+                                    p[0] += i as f32 * 0.5;
+                                }
+                            }
+                        }
+                    }
+                    d
+                })
+                .collect();
+            let refs: Vec<&DisplayList> = moving.iter().collect();
+            let out = g.render_batch(&refs).unwrap(); // several chunks reuse the cached layer
+            for (i, (dl, gf)) in moving.iter().zip(&out).enumerate() {
+                let c = rasterize(dl);
+                let diff: u64 = c.iter().zip(gf).map(|(a, b)| (*a as i32 - *b as i32).unsigned_abs() as u64).sum();
+                assert!((diff as f64 / c.len() as f64) < 2.0, "{w}x{h} frame {i}: GPU differs from CPU");
+                // The layer's interior is drawn.
+                assert!(near(px_at(gf, w, 12, 12), [26, 153, 51], 3), "{w}x{h} frame {i}: layer missing");
+            }
+        }
+    }
+}
+
+fn px_at(buf: &[u8], w: u32, x: u32, y: u32) -> [u8; 4] {
+    let i = ((y * w + x) * 4) as usize;
+    [buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]
 }

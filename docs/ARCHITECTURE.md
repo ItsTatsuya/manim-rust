@@ -73,12 +73,18 @@ trait Animation {
 1. **Scene thread:** builds a display list per frame and collapses repeats into
    `(DisplayList, repeat_count)`. The last entry is held back so a following identical
    frame only bumps its count.
-2. **Render thread:** rasterizes batches (`Renderer::batch_size`), then sends `Arc` frames on.
-3. **Encode thread:** converts to YUV with yuvutils-rs (SIMD, ~16× less CPU than the scalar loop it replaced, which matters because it shares cores with x264) and writes each frame `repeat` times to ffmpeg's
+2. **Render thread:** rasterizes batches (`Renderer::render_batch_with`). Each frame is
+   passed through the writer's `FramePreparer` (RGBA → YUV 4:2:0 with yuvutils-rs for MP4,
+   NeuQuant palette + indices for GIF) on the thread that drew it, then the RGBA buffer
+   goes back to a `FramePool`. Writers without a preparer (PNG, none) get shared RGBA frames.
+3. **Encode thread:** only moves bytes: writes each prepared frame `repeat` times to ffmpeg's
    stdin, or merges repeats into one GIF frame with a longer delay.
 
 All channels are bounded, so a slow encoder applies backpressure instead of buffering
-gigabytes of frames. With `-s` only the final display list is kept and rasterized.
+gigabytes of frames. `plan_queues` sizes the batch and the encoder queue by bytes
+(`FRAME_MEMORY_BUDGET`, 512 MB), so 4K frames get a smaller batch than 1080p ones. Frame
+buffers are recycled through `FramePool` (only the last holder of a shared buffer returns it).
+With `-s` only the final display list is kept and rasterized.
 
 ## Output (`src/output.rs`)
 

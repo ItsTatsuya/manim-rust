@@ -14,15 +14,24 @@ use lyon::tessellation::{
 use rayon::prelude::*;
 use wgpu::util::DeviceExt;
 
-use super::{DisplayList, Renderer};
+use super::{DisplayList, DrawPath, FramePool, Renderer};
 
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 /// Curve flattening tolerance in pixels.
 const TOLERANCE: f32 = 0.15;
-/// Frames per GPU submission.
-const CHUNK: usize = 8;
+/// Most frames per GPU submission (fewer when frames are big, see [`chunk_for`]).
+const MAX_CHUNK: usize = 16;
 /// Frames handed over per `render_batch` call (several pipelined chunks).
 const BATCH: usize = 48;
+/// Memory for readback buffers (two chunks of padded frames are alive at once).
+const READBACK_BUDGET: u64 = 256 << 20;
+
+/// Frames per GPU submission: one per thread that tessellates (they run in parallel), but
+/// two chunks of readback buffers must fit in [`READBACK_BUDGET`].
+fn chunk_for(threads: usize, padded_frame_bytes: u64) -> usize {
+    let fit = (READBACK_BUDGET / (2 * padded_frame_bytes.max(1))) as usize;
+    threads.clamp(4, MAX_CHUNK).min(fit.max(2))
+}
 
 const SHADER: &str = r#"
 struct VsOut {
@@ -80,6 +89,7 @@ pub fn adapter_report() -> String {
     out
 }
 
+/// wgpu renderer: lyon tessellates paths in parallel, wgpu draws them with 4x MSAA. Created with [`GpuRenderer::new`].
 pub struct GpuRenderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -96,7 +106,29 @@ pub struct GpuRenderer {
     /// (whose default is to panic). A set error fails every later batch.
     error: Arc<Mutex<Option<String>>>,
     max_buffer: u64,
+    /// Frames per submission (also the readback ring's half size).
+    chunk: usize,
+    /// Per-frame geometry, written with `queue.write_buffer` into buffers that only grow.
+    vertices: Option<wgpu::Buffer>,
+    indices: Option<wgpu::Buffer>,
+    /// Tessellated background layers (most recent last), so a static backdrop is
+    /// tessellated and uploaded once instead of every frame.
+    layers: Vec<Arc<LayerGpu>>,
+    pool: FramePool,
 }
+
+/// A background layer on the GPU. The `Arc` of paths is kept so the pointer used as the
+/// key cannot be reused by a different layer while this entry lives.
+struct LayerGpu {
+    paths: Arc<Vec<DrawPath>>,
+    size: (u32, u32),
+    /// `None` when the layer draws nothing, or is too big for the GPU's buffers.
+    buffers: Option<(wgpu::Buffer, wgpu::Buffer, u32)>,
+    /// Its geometry exceeds the GPU's buffer limit: chunks that show it go to the CPU.
+    too_big: bool,
+}
+
+const MAX_CACHED_LAYERS: usize = 4;
 
 impl GpuRenderer {
     /// `require_hardware` rejects software adapters (WARP, llvmpipe), which are slower
@@ -125,7 +157,7 @@ impl GpuRenderer {
             required_limits: wgpu::Limits {
                 // Readback buffers hold a whole frame: allow what the adapter can do.
                 max_buffer_size: limits.max_buffer_size,
-                ..wgpu::Limits::downlevel_defaults().using_resolution(limits.clone())
+                ..wgpu::Limits::downlevel_defaults().using_resolution(limits)
             },
             memory_hints: wgpu::MemoryHints::Performance,
             ..Default::default()
@@ -235,7 +267,57 @@ impl GpuRenderer {
             padded_row,
             error,
             max_buffer,
+            chunk: chunk_for(rayon::current_num_threads(), padded_row as u64 * height as u64),
+            vertices: None,
+            indices: None,
+            layers: Vec::new(),
+            pool: FramePool::new(),
         })
+    }
+
+    /// The GPU copy of a frame's background layer (tessellated on first sight).
+    fn layer_gpu(&mut self, dl: &DisplayList) -> Option<Arc<LayerGpu>> {
+        let layer = &dl.background_layer.as_ref()?.0;
+        let size = (dl.width, dl.height);
+        if let Some(i) = self.layers.iter().position(|l| Arc::ptr_eq(&l.paths, layer) && l.size == size) {
+            let hit = self.layers.remove(i);
+            self.layers.push(hit.clone());
+            return Some(hit);
+        }
+        let geom = tessellate(layer.iter(), dl.width, dl.height);
+        let (vb, ib) =
+            (std::mem::size_of_val(&geom.vertices[..]) as u64, std::mem::size_of_val(&geom.indices[..]) as u64);
+        let too_big = vb > self.max_buffer || ib > self.max_buffer;
+        let buffers = (!geom.indices.is_empty() && !too_big).then(|| {
+            let make = |contents: &[u8], usage| {
+                self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents, usage })
+            };
+            (
+                make(bytemuck::cast_slice(&geom.vertices), wgpu::BufferUsages::VERTEX),
+                make(bytemuck::cast_slice(&geom.indices), wgpu::BufferUsages::INDEX),
+                geom.indices.len() as u32,
+            )
+        });
+        let entry = Arc::new(LayerGpu { paths: layer.clone(), size, buffers, too_big });
+        if self.layers.len() >= MAX_CACHED_LAYERS {
+            self.layers.remove(0);
+        }
+        self.layers.push(entry.clone());
+        Some(entry)
+    }
+
+    /// Grow `buf` to hold `bytes` (rounded up to a power of two); never shrinks.
+    fn ensure(&self, buf: &mut Option<wgpu::Buffer>, bytes: u64, usage: wgpu::BufferUsages) {
+        if buf.as_ref().is_some_and(|b| b.size() >= bytes) {
+            return;
+        }
+        let size = bytes.next_power_of_two().clamp(1 << 16, self.max_buffer);
+        *buf = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size,
+            usage: usage | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
     }
 
     /// The first error wgpu reported, if any.
@@ -259,13 +341,17 @@ impl GpuRenderer {
     }
 }
 
-fn tessellate(dl: &DisplayList) -> VertexBuffers<Vertex, u32> {
-    let (w, h) = (dl.width as f32, dl.height as f32);
+fn tessellate<'a>(
+    items: impl IntoIterator<Item = &'a DrawPath>,
+    width: u32,
+    height: u32,
+) -> VertexBuffers<Vertex, u32> {
+    let (w, h) = (width as f32, height as f32);
     let ndc = move |x: f32, y: f32| [x / w * 2.0 - 1.0, 1.0 - y / h * 2.0];
     let mut geom: VertexBuffers<Vertex, u32> = VertexBuffers::new();
     let mut fill_t = FillTessellator::new();
     let mut stroke_t = StrokeTessellator::new();
-    for item in dl.all_items().filter(|i| i.image.is_none()) {
+    for item in items.into_iter().filter(|i| i.image.is_none()) {
         let mut b = Path::builder();
         for sp in &item.subpaths {
             b.begin(point(sp.start[0], sp.start[1]));
@@ -314,13 +400,18 @@ impl Renderer for GpuRenderer {
         BATCH
     }
 
+    fn use_pool(&mut self, pool: FramePool) {
+        self.pool = pool;
+    }
+
     /// Chunks are pipelined: while the GPU renders chunk k, the CPU reads back chunk k-1
     /// and tessellates chunk k+1. Readback buffers alternate between two slots.
     fn render_batch(&mut self, frames: &[&DisplayList]) -> Result<Vec<Vec<u8>>> {
         // Raster images are drawn by the CPU rasterizer (a GPU texture path would cost
         // more in uploads than these frames take to rasterize on all cores).
         if frames.iter().any(|f| f.has_images()) {
-            return Ok(frames.par_iter().map(|f| super::cpu::rasterize(f)).collect());
+            let pool = &self.pool;
+            return Ok(frames.par_iter().map(|f| super::cpu::rasterize_pooled(f, pool)).collect());
         }
         for dl in frames {
             if dl.width != self.width || dl.height != self.height {
@@ -331,22 +422,30 @@ impl Renderer for GpuRenderer {
         let mut out = Vec::with_capacity(frames.len());
         let mut in_flight: Option<InFlight> = None;
         let result = (|| -> Result<()> {
-            for (k, chunk) in frames.chunks(CHUNK).enumerate() {
-                let geoms: Vec<_> = chunk.par_iter().map(|dl| tessellate(dl)).collect();
-                let too_big = geoms.iter().any(|g| {
-                    (g.vertices.len() * std::mem::size_of::<Vertex>()) as u64 > self.max_buffer
-                        || (g.indices.len() * 4) as u64 > self.max_buffer
-                });
-                if too_big {
+            let chunk_len = self.chunk;
+            for (k, chunk) in frames.chunks(chunk_len).enumerate() {
+                let layers: Vec<Option<Arc<LayerGpu>>> = chunk.iter().map(|dl| self.layer_gpu(dl)).collect();
+                let geoms: Vec<_> = chunk.par_iter().map(|dl| tessellate(&dl.items, dl.width, dl.height)).collect();
+                let vertex_bytes: u64 =
+                    geoms.iter().map(|g| (g.vertices.len() * std::mem::size_of::<Vertex>()) as u64).sum();
+                let index_bytes: u64 = geoms.iter().map(|g| (g.indices.len() * 4) as u64).sum();
+                let layer_too_big = layers.iter().flatten().any(|l| l.too_big);
+                if vertex_bytes > self.max_buffer || index_bytes > self.max_buffer || layer_too_big {
                     // Geometry past the GPU's buffer limit: rasterize this chunk on the CPU.
                     if let Some(prev) = in_flight.take() {
                         out.extend(self.collect(prev)?);
                     }
-                    out.extend(chunk.par_iter().map(|f| super::cpu::rasterize(f)).collect::<Vec<_>>());
+                    let pool = &self.pool;
+                    out.extend(chunk.par_iter().map(|f| super::cpu::rasterize_pooled(f, pool)).collect::<Vec<_>>());
                     continue;
                 }
-                let next = self.submit_chunk(chunk, &geoms, (k % 2) * CHUNK)?;
-                self.check()?;
+                let next = self.submit_chunk(chunk, &geoms, &layers, (k % 2) * chunk_len)?;
+                if let Err(e) = self.check() {
+                    // The readbacks are already mapping: wait them out and unmap, or the
+                    // next batch finds its buffers still pending.
+                    self.release(&next);
+                    return Err(e);
+                }
                 if let Some(prev) = in_flight.replace(next) {
                     out.extend(self.collect(prev)?);
                 }
@@ -367,6 +466,9 @@ impl Renderer for GpuRenderer {
     }
 }
 
+/// Longest wait for the GPU to finish a chunk; a hung driver becomes an error, not a hang.
+const GPU_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
 struct InFlight {
     first_buffer: usize,
     count: usize,
@@ -377,7 +479,9 @@ struct InFlight {
 impl GpuRenderer {
     /// Wait for a chunk and unmap its buffers, discarding the frames.
     fn release(&self, f: &InFlight) {
-        let _ = self.device.poll(wgpu::PollType::Wait { submission_index: Some(f.submission.clone()), timeout: None });
+        let _ = self
+            .device
+            .poll(wgpu::PollType::Wait { submission_index: Some(f.submission.clone()), timeout: Some(GPU_WAIT) });
         for buf in &self.readbacks[f.first_buffer..f.first_buffer + f.count] {
             buf.unmap();
         }
@@ -386,7 +490,7 @@ impl GpuRenderer {
     fn collect(&mut self, f: InFlight) -> Result<Vec<Vec<u8>>> {
         let waited = self
             .device
-            .poll(wgpu::PollType::Wait { submission_index: Some(f.submission.clone()), timeout: None })
+            .poll(wgpu::PollType::Wait { submission_index: Some(f.submission.clone()), timeout: Some(GPU_WAIT) })
             .context("waiting for the GPU")
             .and_then(|_| {
                 for _ in 0..f.count {
@@ -399,14 +503,20 @@ impl GpuRenderer {
             return Err(e);
         }
         let row = (self.width * 4) as usize;
+        let padded = self.padded_row as usize;
         let mut out = Vec::with_capacity(f.count);
         for buf in &self.readbacks[f.first_buffer..f.first_buffer + f.count] {
             {
                 let data = buf.slice(..).get_mapped_range();
-                let mut frame = Vec::with_capacity(row * self.height as usize);
-                for y in 0..self.height as usize {
-                    let s = y * self.padded_row as usize;
-                    frame.extend_from_slice(&data[s..s + row]);
+                let len = row * self.height as usize;
+                let mut frame = self.pool.take(len);
+                if padded == row {
+                    // Rows are not padded (width a multiple of 64): one copy.
+                    frame.copy_from_slice(&data[..len]);
+                } else {
+                    for (dst, src) in frame.chunks_exact_mut(row).zip(data.chunks_exact(padded)) {
+                        dst.copy_from_slice(&src[..row]);
+                    }
                 }
                 out.push(frame);
             }
@@ -419,29 +529,38 @@ impl GpuRenderer {
         &mut self,
         frames: &[&DisplayList],
         geoms: &[VertexBuffers<Vertex, u32>],
+        layers: &[Option<Arc<LayerGpu>>],
         first_buffer: usize,
     ) -> Result<InFlight> {
         for i in 0..frames.len() {
             self.readback(first_buffer + i);
         }
+        // All of the chunk's geometry goes into two persistent buffers, one slice per frame.
+        // `write_buffer` is ordered with the submissions around it, so the previous chunk,
+        // still drawing from the same buffers, is unaffected.
+        let vertex_bytes: u64 = geoms.iter().map(|g| (g.vertices.len() * std::mem::size_of::<Vertex>()) as u64).sum();
+        let index_bytes: u64 = geoms.iter().map(|g| (g.indices.len() * 4) as u64).sum();
+        let (mut vertices, mut indices) = (self.vertices.take(), self.indices.take());
+        self.ensure(&mut vertices, vertex_bytes, wgpu::BufferUsages::VERTEX);
+        self.ensure(&mut indices, index_bytes, wgpu::BufferUsages::INDEX);
+        let mut slices = Vec::with_capacity(geoms.len());
+        let (mut voff, mut ioff) = (0u64, 0u64);
+        for g in geoms {
+            let (vlen, ilen) =
+                ((g.vertices.len() * std::mem::size_of::<Vertex>()) as u64, (g.indices.len() * 4) as u64);
+            if let (Some(vb), Some(ib), true) = (&vertices, &indices, ilen > 0) {
+                self.queue.write_buffer(vb, voff, bytemuck::cast_slice(&g.vertices));
+                self.queue.write_buffer(ib, ioff, bytemuck::cast_slice(&g.indices));
+            }
+            slices.push((voff, vlen, ioff, ilen));
+            voff += vlen;
+            ioff += ilen;
+        }
 
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-        let mut keep_alive = Vec::new();
         let size = wgpu::Extent3d { width: self.width, height: self.height, depth_or_array_layers: 1 };
         for (i, (dl, geom)) in frames.iter().zip(geoms).enumerate() {
-            let buffers = (!geom.indices.is_empty()).then(|| {
-                let vb = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: None,
-                    contents: bytemuck::cast_slice(&geom.vertices),
-                    usage: wgpu::BufferUsages::VERTEX,
-                });
-                let ib = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: None,
-                    contents: bytemuck::cast_slice(&geom.indices),
-                    usage: wgpu::BufferUsages::INDEX,
-                });
-                (vb, ib)
-            });
+            let (voff, vlen, ioff, ilen) = slices[i];
             {
                 let bg = dl.background;
                 let (view, resolve_target) = match &self.msaa_view {
@@ -469,10 +588,15 @@ impl GpuRenderer {
                     occlusion_query_set: None,
                     multiview_mask: None,
                 });
-                if let Some((vb, ib)) = &buffers {
-                    pass.set_pipeline(&self.pipeline);
+                pass.set_pipeline(&self.pipeline);
+                if let Some((vb, ib, n)) = layers[i].as_ref().and_then(|l| l.buffers.as_ref()) {
                     pass.set_vertex_buffer(0, vb.slice(..));
                     pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..*n, 0, 0..1);
+                }
+                if let (Some(vb), Some(ib), true) = (&vertices, &indices, ilen > 0) {
+                    pass.set_vertex_buffer(0, vb.slice(voff..voff + vlen));
+                    pass.set_index_buffer(ib.slice(ioff..ioff + ilen), wgpu::IndexFormat::Uint32);
                     pass.draw_indexed(0..geom.indices.len() as u32, 0, 0..1);
                 }
             }
@@ -493,10 +617,10 @@ impl GpuRenderer {
                 },
                 size,
             );
-            keep_alive.push(buffers);
         }
         let submission = self.queue.submit([encoder.finish()]);
-        drop(keep_alive); // wgpu keeps submitted resources alive internally
+        self.vertices = vertices;
+        self.indices = indices;
 
         let (tx, rx) = mpsc::channel();
         for i in 0..frames.len() {
@@ -506,5 +630,24 @@ impl GpuRenderer {
             });
         }
         Ok(InFlight { first_buffer, count: frames.len(), submission, rx })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chunks_follow_threads_within_the_readback_budget() {
+        let frame = |w: u64, h: u64| (w * 4).div_ceil(256) * 256 * h;
+        assert_eq!(chunk_for(16, frame(1920, 1080)), 16);
+        assert_eq!(chunk_for(32, frame(1920, 1080)), MAX_CHUNK);
+        assert_eq!(chunk_for(2, frame(1280, 720)), 4); // never below a few frames
+                                                       // 4K: two chunks of padded frames fit in the budget, so fewer frames per chunk.
+        let big = chunk_for(16, frame(3840, 2160));
+        assert!((2..16).contains(&big));
+        assert!(2 * big as u64 * frame(3840, 2160) <= READBACK_BUDGET);
+        // Absurd frames still make progress.
+        assert_eq!(chunk_for(16, READBACK_BUDGET), 2);
     }
 }

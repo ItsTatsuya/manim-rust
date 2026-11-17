@@ -10,37 +10,64 @@
 /// Token classes, named after Pygments' token types.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum TokenKind {
+    /// Plain text and identifiers (`Text`).
     Text,
+    /// Keyword (`Keyword`).
     Keyword,
+    /// Import or module keyword (`Keyword.Namespace`).
     KeywordNamespace,
+    /// Constant keyword such as `true` or `None` (`Keyword.Constant`).
     KeywordConstant,
+    /// Primitive type keyword (`Keyword.Type`).
     KeywordType,
+    /// Declaration keyword such as `let` or `fn` (`Keyword.Declaration`).
     KeywordDeclaration,
+    /// Builtin function or type (`Name.Builtin`).
     Builtin,
+    /// Pseudo-builtin such as `self` (`Name.Builtin.Pseudo`).
     BuiltinPseudo,
+    /// Function name at its definition (`Name.Function`).
     Function,
+    /// Class or type name at its definition (`Name.Class`).
     Class,
+    /// Decorator or annotation (`Name.Decorator`).
     Decorator,
+    /// Macro invocation, e.g. `name!` in Rust.
     Macro,
+    /// Attribute (`Name.Attribute`).
     Attribute,
+    /// String literal (`String`).
     String,
+    /// Escape sequence inside a string (`String.Escape`).
     StringEscape,
+    /// Interpolated expression inside a string (`String.Interpol`).
     StringInterpol,
+    /// Documentation string (`String.Doc`).
     StringDoc,
+    /// Numeric literal (`Number`).
     Number,
+    /// Comment (`Comment`).
     Comment,
+    /// Preprocessor line (`Comment.Preproc`).
     Preproc,
+    /// Symbolic operator (`Operator`).
     Operator,
+    /// Word operator such as `and` or `in` (`Operator.Word`).
     OperatorWord,
+    /// Punctuation (`Punctuation`).
     Punctuation,
+    /// Markup tag (`Name.Tag`).
     Tag,
+    /// Variable (`Name.Variable`).
     Variable,
 }
 
 /// One lexed piece of the source.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Token {
+    /// The token class.
     pub kind: TokenKind,
+    /// The source text of the token.
     pub text: String,
 }
 
@@ -1469,9 +1496,13 @@ pub fn tokenize(code: &str, language: &str) -> anyhow::Result<Vec<Token>> {
 /// A color style: background, default text, line numbers, and a color per token class.
 #[derive(Clone, Copy, Debug)]
 pub struct Style {
+    /// Pygments style name, e.g. `"vim"`.
     pub name: &'static str,
+    /// Background color as `#RRGGBB`.
     pub background: &'static str,
+    /// Default text color as `#RRGGBB`.
     pub text: &'static str,
+    /// Line number color as `#RRGGBB`.
     pub line_number: &'static str,
     /// Colors for `TokenKind::Keyword ..= TokenKind::Variable`; `None` uses `text`.
     colors: [Option<&'static str>; 24],

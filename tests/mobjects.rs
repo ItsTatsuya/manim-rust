@@ -463,3 +463,61 @@ fn world_lookups_of_missing_ids_are_errors() {
     let mut earlier = earlier;
     assert!(earlier.try_get_mut(later).is_err());
 }
+
+/// Fallback chains and parsed faces are cached; registering a font must make the new family
+/// take effect for styles that were resolved before it existed.
+#[cfg(feature = "math")]
+#[test]
+fn registering_a_font_invalidates_the_text_caches() {
+    use manim::text::{has_font, register_font_data, TextStyle};
+    let data = typst_assets::fonts().next().expect("embedded fonts").to_vec();
+    let mut db = fontdb::Database::new();
+    db.load_font_data(data.clone());
+    let family = db.faces().next().expect("a face").families[0].0.clone();
+    if has_font(&family) {
+        eprintln!("skipping: {family} is installed on this machine");
+        return; // nothing to tell before from after
+    }
+    let style = |f: &str| TextStyle::default().font(f);
+    let sample = "Hamburgefonstiv";
+    let before = Text::styled(sample, style(&family));
+    let again = Text::styled(sample, style(&family)); // served from the cache
+    assert_eq!(before.width(), again.width());
+    let families = register_font_data(data).unwrap();
+    assert!(families.contains(&family) && has_font(&family));
+    let after = Text::styled(sample, style(&family));
+    assert!(
+        (before.width() - after.width()).abs() > 1e-6,
+        "the font registered after the first layout was not picked up (cached chain)"
+    );
+    // And the cache is warm again, with the same answer.
+    assert_eq!(after.width(), Text::styled(sample, style(&family)).width());
+}
+
+#[test]
+fn repeated_text_layout_is_stable() {
+    // The caches must not change results: the same text laid out twice, and at two weights.
+    let a = Text::new("Cached glyphs, cached faces");
+    let b = Text::new("Cached glyphs, cached faces");
+    assert_eq!(a.width(), b.width());
+    assert_eq!(a.num_curves(), b.num_curves());
+    let bold = Text::styled("Cached glyphs", manim::text::TextStyle::default().weight(700));
+    let regular = Text::styled("Cached glyphs", manim::text::TextStyle::default());
+    assert!(bold.num_curves() > 0 && regular.num_curves() > 0);
+    let bold2 = Text::styled("Cached glyphs", manim::text::TextStyle::default().weight(700));
+    assert_eq!(bold.width(), bold2.width());
+}
+
+#[test]
+fn family_iter_matches_family() {
+    let leaf = Square::new(1.0);
+    let nested =
+        VMobject::group(vec![VMobject::group(vec![Circle::new(1.0), Dot::new()]), Square::new(2.0), Dot::new()]);
+    for m in [&leaf, &nested] {
+        let a: Vec<*const VMobject> = m.family().into_iter().map(|x| x as *const _).collect();
+        let b: Vec<*const VMobject> = m.family_iter().map(|x| x as *const _).collect();
+        assert_eq!(a, b);
+    }
+    assert_eq!(leaf.family_iter().count(), 1);
+    assert_eq!(nested.family_iter().count(), 6);
+}

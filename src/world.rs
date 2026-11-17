@@ -9,9 +9,11 @@ use std::sync::Arc;
 
 use crate::mobject::VMobject;
 
+/// Handle to a mobject stored in a [`World`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct MobjectId(pub(crate) usize);
 
+/// Handle to a value tracker stored in a [`World`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct TrackerId(pub(crate) usize);
 
@@ -30,6 +32,7 @@ pub struct World {
 }
 
 impl World {
+    /// An empty world.
     pub fn new() -> Self {
         Self::default()
     }
@@ -57,13 +60,22 @@ impl World {
         self.mobjects.get(id.0).map(|m| &**m).ok_or_else(|| missing(id, n))
     }
 
+    /// Mutable access to mobject `id` (copy-on-write), or an error if it does not exist.
     pub fn try_get_mut(&mut self, id: MobjectId) -> anyhow::Result<&mut VMobject> {
         let n = self.mobjects.len();
         self.mobjects.get_mut(id.0).map(Arc::make_mut).ok_or_else(|| missing(id, n))
     }
 
+    /// Replace mobject `id`. Panics if it doesn't exist (see [`World::try_set`]).
     pub fn set(&mut self, id: MobjectId, m: VMobject) {
-        self.mobjects[id.0] = Arc::new(m);
+        self.try_set(id, m).unwrap_or_else(|e| panic!("{e}"));
+    }
+
+    /// Replace mobject `id`, or fail if this world has no such mobject.
+    pub fn try_set(&mut self, id: MobjectId, m: VMobject) -> anyhow::Result<()> {
+        let n = self.mobjects.len();
+        *self.mobjects.get_mut(id.0).ok_or_else(|| missing(id, n))? = Arc::new(m);
+        Ok(())
     }
 
     /// Apply builder-style methods in place: `w.modify(id, |m| m.shift(RIGHT))`.
@@ -76,6 +88,7 @@ impl World {
         self.mobjects.len()
     }
 
+    /// Whether the world stores no mobjects.
     pub fn is_empty(&self) -> bool {
         self.mobjects.is_empty()
     }
@@ -85,12 +98,14 @@ impl World {
         id.0 < self.mobjects.len()
     }
 
+    /// Add `id` to the scene layer (on top) if it is not displayed already.
     pub fn show(&mut self, id: MobjectId) {
         if !self.display.contains(&id) {
             self.display.push(id);
         }
     }
 
+    /// Remove `id` from the scene layer.
     pub fn hide(&mut self, id: MobjectId) {
         self.display.retain(|d| *d != id);
     }
@@ -101,6 +116,7 @@ impl World {
         self.display.push(id);
     }
 
+    /// Move to the bottom of the draw order.
     pub fn bring_to_back(&mut self, id: MobjectId) {
         self.hide(id);
         self.display.insert(0, id);
@@ -115,10 +131,12 @@ impl World {
         }
     }
 
+    /// Whether `id` is in the scene layer.
     pub fn is_displayed(&self, id: MobjectId) -> bool {
         self.display.contains(&id)
     }
 
+    /// Mobjects of the scene layer, in draw order (before z-index sorting).
     pub fn displayed(&self) -> &[MobjectId] {
         &self.display
     }
@@ -146,18 +164,22 @@ impl World {
         }
     }
 
+    /// Mobjects drawn below everything, in order.
     pub fn background(&self) -> &[MobjectId] {
         &self.background
     }
 
+    /// Mobjects drawn above everything, in order.
     pub fn overlay(&self) -> &[MobjectId] {
         &self.overlay
     }
 
+    /// Empty the background layer.
     pub fn clear_background(&mut self) {
         self.background.clear();
     }
 
+    /// Empty the overlay layer.
     pub fn clear_overlay(&mut self) {
         self.overlay.clear();
     }
@@ -169,26 +191,46 @@ impl World {
         self.overlay.retain(|d| *d != id);
     }
 
+    /// Current values of every tracker, indexed by creation order.
     pub fn trackers(&self) -> &[f64] {
         &self.trackers
     }
 
+    /// Create a tracker holding `v`.
     pub fn tracker(&mut self, v: f64) -> TrackerId {
         self.trackers.push(v);
         TrackerId(self.trackers.len() - 1)
     }
 
+    /// The tracker's value. Panics if `t` doesn't exist (see [`World::try_value`]).
     pub fn value(&self, t: TrackerId) -> f64 {
-        self.trackers[t.0]
+        self.try_value(t).unwrap_or_else(|e| panic!("{e}"))
     }
 
+    /// Panics if `t` doesn't exist (see [`World::try_set_value`]).
     pub fn set_value(&mut self, t: TrackerId, v: f64) {
-        self.trackers[t.0] = v;
+        self.try_set_value(t, v).unwrap_or_else(|e| panic!("{e}"));
+    }
+
+    /// Value of tracker `t`, or an error if it does not exist.
+    pub fn try_value(&self, t: TrackerId) -> anyhow::Result<f64> {
+        self.trackers.get(t.0).copied().ok_or_else(|| missing_tracker(t, self.trackers.len()))
+    }
+
+    /// Set the value of tracker `t`, or error if it does not exist.
+    pub fn try_set_value(&mut self, t: TrackerId, v: f64) -> anyhow::Result<()> {
+        let n = self.trackers.len();
+        *self.trackers.get_mut(t.0).ok_or_else(|| missing_tracker(t, n))? = v;
+        Ok(())
     }
 }
 
 fn missing(id: MobjectId, n: usize) -> anyhow::Error {
     anyhow::anyhow!("mobject {} does not exist at this point of the scene (the world has {n})", id.0)
+}
+
+fn missing_tracker(t: TrackerId, n: usize) -> anyhow::Error {
+    anyhow::anyhow!("value tracker {} does not exist at this point of the scene (the world has {n})", t.0)
 }
 
 impl Index<MobjectId> for World {

@@ -30,6 +30,7 @@ pub struct Item {
     pub bbox: [f64; 4],
     /// Largest fill or stroke opacity in the family.
     pub opacity: f64,
+    /// Draw order (higher draws on top).
     pub z_index: i32,
     /// Whether it draws text.
     pub text: bool,
@@ -128,6 +129,7 @@ fn area(a: &[f64; 4]) -> f64 {
     ((a[2] - a[0]) * (a[3] - a[1])).max(1e-9)
 }
 
+/// A layout problem found by the [`Checker`].
 #[derive(Clone, Debug, Serialize)]
 pub struct Problem {
     /// `overlap`, `offscreen` or `ghosting`.
@@ -136,8 +138,11 @@ pub struct Problem {
     pub time: f64,
     /// Index of the `play` it happened in.
     pub play: Option<usize>,
+    /// Name of the first mobject involved (its label).
     pub a: String,
+    /// Name of the second mobject, for problems between two (`overlap`, `ghosting`).
     pub b: Option<String>,
+    /// Human-readable description.
     pub message: String,
 }
 
@@ -155,6 +160,7 @@ pub struct Checker {
 }
 
 impl Checker {
+    /// A checker for a frame of the given size in scene units, with the default thresholds.
     pub fn new(frame_width: f64, frame_height: f64) -> Self {
         Checker {
             frame_width,
@@ -167,6 +173,7 @@ impl Checker {
         }
     }
 
+    /// Every problem found so far, in the order reported.
     pub fn problems(&self) -> &[Problem] {
         &self.problems
     }

@@ -14,12 +14,15 @@ pub use movement::*;
 use crate::rate_functions::{self, RateFunc};
 use crate::world::World;
 
+/// Run time in seconds of an animation that sets none.
 pub const DEFAULT_RUN_TIME: f64 = 1.0;
 
+/// Timing shared by every animation: run time, easing and stagger.
 #[derive(Clone, Copy, Debug)]
 pub struct AnimConfig {
     /// Seconds. A negative value means "work it out in `resolve`".
     pub run_time: f64,
+    /// Easing applied to the progress (see [`rate_functions`]).
     pub rate_func: RateFunc,
     /// Stagger between family members / grouped animations (0 = all at once, 1 = one after another).
     pub lag_ratio: f64,
@@ -32,6 +35,7 @@ impl Default for AnimConfig {
 }
 
 impl AnimConfig {
+    /// Config with the given run time (seconds), rate function and lag ratio.
     pub fn new(run_time: f64, rate_func: RateFunc, lag_ratio: f64) -> Self {
         AnimConfig { run_time, rate_func, lag_ratio }
     }
@@ -40,6 +44,7 @@ impl AnimConfig {
 /// Copy an animation before it starts (timeline seeking replays plays from copies).
 /// Implemented automatically for every `Animation + Clone`.
 pub trait AnimClone {
+    /// A boxed copy of this animation.
     fn box_clone(&self) -> Box<dyn Animation>;
 }
 
@@ -58,14 +63,23 @@ impl Clone for Box<dyn Animation> {
 /// An animation. Implementations must be `Clone` (derive it): a clone made before
 /// `begin` must replay the same frames, which is how timelines seek.
 pub trait Animation: AnimClone {
+    /// Display name, used in timelines and events.
     fn name(&self) -> String {
         "Animation".into()
     }
+    /// The animation's timing.
     fn config(&self) -> &AnimConfig;
+    /// Mutable access to the timing (what [`AnimationExt`]'s builders change).
     fn config_mut(&mut self) -> &mut AnimConfig;
     /// Fill in config that depends on the world (e.g. `Write` timing by glyph count).
     /// Called before `begin`, possibly earlier for animations inside groups.
     fn resolve(&mut self, _w: &World) {}
+    /// Whether the animation (as resolved) can run: `Scene::play` records the error and
+    /// plays nothing otherwise.
+    fn validate(&self, _w: &World) -> anyhow::Result<()> {
+        Ok(())
+    }
+    /// Capture the starting state from `w` and prepare to draw frames. Called once, before the first [`apply`](Animation::apply).
     fn begin(&mut self, w: &mut World);
     /// `alpha` has the rate function applied.
     fn apply(&mut self, w: &mut World, alpha: f64);
@@ -76,6 +90,7 @@ pub trait Animation: AnimClone {
         let f = self.config().rate_func;
         self.apply(w, f(t));
     }
+    /// Called once after the last frame: restore or remove mobjects as the animation requires.
     fn clean_up(&mut self, _w: &mut World) {}
 }
 
@@ -91,6 +106,9 @@ impl Animation for Box<dyn Animation> {
     }
     fn resolve(&mut self, w: &World) {
         (**self).resolve(w)
+    }
+    fn validate(&self, w: &World) -> anyhow::Result<()> {
+        (**self).validate(w)
     }
     fn begin(&mut self, w: &mut World) {
         (**self).begin(w)
@@ -108,18 +126,22 @@ impl Animation for Box<dyn Animation> {
 
 /// Builder helpers available on every animation.
 pub trait AnimationExt: Animation + Sized + 'static {
+    /// Set the run time in seconds.
     fn run_time(mut self, t: f64) -> Self {
         self.config_mut().run_time = t;
         self
     }
+    /// Set the rate function.
     fn rate_func(mut self, f: RateFunc) -> Self {
         self.config_mut().rate_func = f;
         self
     }
+    /// Set the lag ratio (0 = parts run together, 1 = one after another).
     fn lag_ratio(mut self, l: f64) -> Self {
         self.config_mut().lag_ratio = l;
         self
     }
+    /// Box the animation as a `Box<dyn Animation>`.
     fn boxed(self) -> Box<dyn Animation> {
         Box::new(self)
     }
@@ -153,6 +175,7 @@ pub fn lagged_alpha(alpha: f64, i: usize, n: usize, lag_ratio: f64) -> f64 {
 
 /// Anything `Scene::play` accepts: one animation, a tuple of them, or a `Vec<Box<dyn Animation>>`.
 pub trait IntoAnimations {
+    /// Convert into the animations to run together in one `play`.
     fn into_animations(self) -> Vec<Box<dyn Animation>>;
 }
 
@@ -211,9 +234,12 @@ pub struct AnimationGroup {
     state: Vec<ChildState>,
     max_end: f64,
     cfg: AnimConfig,
+    /// Set by `resolve` when a member's run time is NaN or infinite.
+    invalid: Option<String>,
 }
 
 impl AnimationGroup {
+    /// Run `anims` together, each at its own offset according to the group's lag ratio (default 0: all at once).
     pub fn new(anims: impl IntoAnimations) -> Self {
         AnimationGroup {
             anims: anims.into_animations(),
@@ -221,6 +247,7 @@ impl AnimationGroup {
             state: Vec::new(),
             max_end: 0.0,
             cfg: AnimConfig::new(-1.0, rate_functions::linear, 0.0),
+            invalid: None,
         }
     }
 
@@ -244,6 +271,7 @@ impl AnimationGroup {
 /// Staggered start (default lag ratio 0.05, like Manim).
 pub struct LaggedStart;
 impl LaggedStart {
+    /// Start `anims` with a lag of 0.05 of the run time between them.
     #[allow(clippy::new_ret_no_self)]
     pub fn new(anims: impl IntoAnimations) -> AnimationGroup {
         AnimationGroup::new(anims).lag_ratio(0.05)
@@ -253,6 +281,7 @@ impl LaggedStart {
 /// One after another.
 pub struct Succession;
 impl Succession {
+    /// Run `anims` one after another.
     #[allow(clippy::new_ret_no_self)]
     pub fn new(anims: impl IntoAnimations) -> AnimationGroup {
         AnimationGroup::new(anims).lag_ratio(1.0)
@@ -271,10 +300,19 @@ impl Animation for AnimationGroup {
         let mut cur = 0.0f64;
         self.timings.clear();
         self.max_end = 0.0;
+        self.invalid = None;
         for a in &mut self.anims {
             a.resolve(w);
+            let run_time = a.config().run_time;
+            // A NaN or infinite member would spread NaN through every timing after it.
+            let run_time = if run_time.is_finite() {
+                run_time.max(0.0)
+            } else {
+                self.invalid.get_or_insert_with(|| format!("{} has a run time of {run_time}", a.name()));
+                0.0
+            };
             let start = cur;
-            let end = start + a.config().run_time.max(0.0);
+            let end = start + run_time;
             self.timings.push((start, end));
             cur = start + (end - start) * self.cfg.lag_ratio;
             self.max_end = self.max_end.max(end);
@@ -283,6 +321,13 @@ impl Animation for AnimationGroup {
             self.cfg.run_time = self.max_end;
         }
         self.state = vec![ChildState::Pending; self.anims.len()];
+    }
+
+    fn validate(&self, w: &World) -> anyhow::Result<()> {
+        if let Some(why) = &self.invalid {
+            anyhow::bail!("animation group: {why} (run times must be finite)");
+        }
+        self.anims.iter().try_for_each(|a| a.validate(w))
     }
 
     fn begin(&mut self, w: &mut World) {
@@ -334,6 +379,7 @@ pub struct Wait {
 }
 
 impl Wait {
+    /// Wait for `seconds`.
     pub fn new(seconds: f64) -> Self {
         Wait { cfg: AnimConfig::new(seconds, rate_functions::linear, 0.0) }
     }

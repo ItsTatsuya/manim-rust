@@ -39,10 +39,12 @@ fn ser_color<S: Serializer>(c: &Color, s: S) -> std::result::Result<S::Ok, S::Er
 
 macro_rules! color_roles {
     ($($name:ident = $default:expr),* $(,)?) => {
+        /// The colors of a theme, one per named role (see [`ThemeColors::ROLES`]).
         #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
         #[serde(default)]
         pub struct ThemeColors {
             $(
+                #[doc = concat!("Color of the `", stringify!($name), "` role.")]
                 #[serde(deserialize_with = "de_color", serialize_with = "ser_color")]
                 pub $name: Color,
             )*
@@ -60,6 +62,7 @@ macro_rules! color_roles {
                     _ => None,
                 }
             }
+            /// Every role name, in declaration order.
             pub const ROLES: &'static [&'static str] = &[$(stringify!($name)),*];
         }
     };
@@ -78,11 +81,15 @@ color_roles! {
     example_fill = 0x0C2A3A,
 }
 
+/// Font families by role (empty = system default).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ThemeFonts {
+    /// Font for titles and headings.
     pub heading: String,
+    /// Font for body text.
     pub body: String,
+    /// Font for code.
     pub code: String,
     /// Handwriting, for notes and annotations (falls back to `body`).
     pub hand: String,
@@ -105,12 +112,17 @@ impl Default for ThemeFonts {
     }
 }
 
+/// Type sizes in points, by role.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ThemeSizes {
+    /// Slide title size.
     pub title: f64,
+    /// Section heading size.
     pub heading: f64,
+    /// Body text size.
     pub body: f64,
+    /// Captions and labels.
     pub small: f64,
 }
 
@@ -120,41 +132,56 @@ impl Default for ThemeSizes {
     }
 }
 
+/// Background pattern drawn behind the scene.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Pattern {
+    /// Plain background.
     #[default]
     None,
+    /// A line grid.
     Grid,
+    /// A dot grid.
     Dots,
 }
 
+/// Where slide titles sit.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum TitlePosition {
+    /// Top-left, at the margin.
     #[default]
     TopLeft,
+    /// Top, horizontally centered.
     TopCenter,
+    /// Centered in the frame.
     Center,
 }
 
+/// How boxes around content are drawn.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum BoxStyle {
+    /// Outline only.
     #[default]
     Outline,
+    /// Filled card.
     Card,
 }
 
+/// Margins, title placement and background pattern.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ThemeLayout {
     /// Distance kept from the frame edges, in scene units.
     pub margin: f64,
+    /// Where titles are placed.
     pub title: TitlePosition,
     /// A bar under titles.
     pub accent: bool,
+    /// Box style.
     pub boxes: BoxStyle,
+    /// Background pattern.
     pub pattern: Pattern,
     /// Spacing of the pattern, in scene units.
     pub pattern_spacing: f64,
@@ -173,11 +200,15 @@ impl Default for ThemeLayout {
     }
 }
 
+/// Default timings for scripts that pace themselves.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ThemePacing {
+    /// Seconds per animation.
     pub run_time: f64,
+    /// Seconds of pause between steps.
     pub wait: f64,
+    /// Reading speed used to time text (words per second).
     pub words_per_second: f64,
 }
 
@@ -187,15 +218,23 @@ impl Default for ThemePacing {
     }
 }
 
+/// A complete house style: colors, fonts, sizes, layout and pacing. Apply it with [`Scene::set_theme`](crate::Scene::set_theme).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Theme {
+    /// Identifier (e.g. a key in a styles file).
     pub id: String,
+    /// Display name.
     pub name: String,
+    /// Color roles.
     pub colors: ThemeColors,
+    /// Font roles.
     pub fonts: ThemeFonts,
+    /// Type sizes.
     pub sizes: ThemeSizes,
+    /// Margins, title placement, pattern.
     pub layout: ThemeLayout,
+    /// Pacing defaults.
     pub pacing: ThemePacing,
 }
 
@@ -232,16 +271,19 @@ impl std::str::FromStr for TextRole {
 }
 
 impl Theme {
+    /// Parse a theme from JSON (see the module docs for the shape).
     pub fn from_json(json: &str) -> Result<Self> {
         serde_json::from_str(json).context("parsing theme JSON")
     }
 
+    /// Read and parse a theme file.
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         let text = std::fs::read_to_string(path).with_context(|| format!("reading theme {}", path.display()))?;
         Self::from_json(&text).with_context(|| format!("in {}", path.display()))
     }
 
+    /// Serialize to pretty-printed JSON that [`Theme::from_json`] reads back.
     pub fn to_json(&self) -> String {
         serde_json::to_string_pretty(self).expect("themes always serialize")
     }

@@ -28,6 +28,11 @@ fn degenerate_geometry_stays_bounded() {
     let axes = Axes::new([1.0, 1.0, 1.0], [-1.0, 1.0, 1.0]);
     assert!(axes.c2p(1.0, 0.0).is_finite());
 
+    // Descending or NaN ranges draw something instead of panicking in `clamp`.
+    for (x, y) in [([5.0, -5.0, 1.0], [3.0, -3.0, 1.0]), ([f64::NAN, 1.0, 1.0], [2.0, f64::NAN, 1.0])] {
+        let _ = Axes::new(x, y).to_mobject();
+    }
+
     // Out-of-range stretch axis is ignored.
     let c = Circle::new(1.0).stretch(2.0, 5);
     assert!((c.width() - 2.0).abs() < 1e-6);
@@ -91,4 +96,44 @@ fn seeking_restores_the_camera() {
     let end = s.duration();
     s.play(d.animate(|m| m.shift(UP)));
     assert!(s.time() > end);
+}
+
+#[test]
+fn a_group_with_an_infinite_member_fails_cleanly() {
+    let mut s = Scene::new(&cfg(), "InfChild").unwrap();
+    let d = s.add(Dot::new());
+    let e = s.add(Dot::new());
+    s.play(
+        AnimationGroup::new((
+            d.animate(|m| m.shift(RIGHT)).run_time(f64::INFINITY),
+            e.animate(|m| m.shift(LEFT)).run_time(1.0),
+        ))
+        .run_time(1.0),
+    );
+    assert!(s.finish(std::time::Instant::now()).is_err());
+}
+
+#[test]
+fn stale_or_foreign_ids_are_errors_not_panics() {
+    let mut other = World::new();
+    for _ in 0..5 {
+        other.insert(Dot::new());
+    }
+    let foreign = other.insert(Dot::new()); // an id this scene's world has never seen
+    other.tracker(0.0);
+    let foreign_tracker = other.tracker(1.0);
+    for case in 0..5 {
+        let mut s = Scene::new(&cfg(), "Stale").unwrap();
+        s.add(Dot::new());
+        match case {
+            0 => s.play(FadeIn::new(foreign)),
+            1 => s.play(Transform::new(foreign, Dot::new())),
+            2 => s.play(DrawBorderThenFill::new(foreign)),
+            3 => s.play(Create::new(foreign)),
+            _ => s.play(ChangeValue::new(foreign_tracker, 2.0)),
+        }
+        assert!(s.finish(std::time::Instant::now()).is_err(), "case {case}");
+    }
+    assert!(World::new().try_value(foreign_tracker).is_err());
+    assert!(World::new().try_set(foreign, Dot::new()).is_err());
 }

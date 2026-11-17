@@ -22,7 +22,7 @@ use crate::mobject::graphing::{Axes, NumberPlane};
 use crate::mobject::grid::{GridMobject, BRACKETS, HORIZONTAL_LINES, VERTICAL_LINES};
 use crate::mobject::matrix::{self, Matrix};
 use crate::mobject::table::Table;
-use crate::mobject::{Subpath, VMobject};
+use crate::mobject::{Subpath, VMobject, MAX_NESTING};
 use crate::rate_functions::{self, RateFunc};
 use crate::scene::{Playback, Scene};
 use crate::text::{Align, DecimalNumber, Text, TextStyle};
@@ -56,6 +56,15 @@ pub(crate) struct State {
     /// Members of a group that is not in the scene, left on screen after a play
     /// (`FadeIn(member)`): they return to the group when the group itself joins the scene.
     loans: Vec<Pop>,
+    /// Indices of `Free` slots, reused by `new_handle` so the table stays as small as the
+    /// number of live handles.
+    free: Vec<u32>,
+    /// Handles whose JS object was collected but which another slot still points at
+    /// (a group whose members are alive); freed once nothing references them.
+    released: Vec<u32>,
+    /// Bumped by every run; a release from an earlier run's JS object must not free a
+    /// slot that now belongs to a different object.
+    epoch: u32,
     pub base_dir: PathBuf,
     pub sandbox: Option<PathBuf>,
 }
@@ -78,9 +87,17 @@ impl State {
     /// pointed into an older world) must not alias mobjects of the new one.
     pub(crate) fn reset_for_run(&mut self, initial: &[Slot]) {
         self.slots = initial.to_vec();
+        self.free = free_slots(&self.slots);
+        self.released.clear();
+        self.epoch = self.epoch.wrapping_add(1);
         self.by_id.clear();
         self.playbacks.clear();
         self.loans.clear();
+    }
+
+    /// Handles in use (a diagnostic: it stays bounded when scripts discard temporaries).
+    fn live_handles(&self) -> usize {
+        self.slots.len() - self.free.len()
     }
 }
 
@@ -184,25 +201,114 @@ pub(crate) fn rate_func(name: &str) -> Result<RateFunc> {
     })
 }
 
+// ---------------------------------------------------------------------- limits
+
+/// Most Bézier curves one script-built mobject may hold. The JS heap limit does not cover
+/// Rust-side geometry, and a few chained calls (`insertCurves(10000)`) multiply it.
+const MAX_CURVES: usize = 1_000_000;
+
+/// Reject mobjects a script made too big or too deeply nested for the host to handle.
+fn check_size(m: &VMobject) -> Result<()> {
+    if m.depth() > MAX_NESTING {
+        bail!("groups nested more than {MAX_NESTING} levels deep are not supported");
+    }
+    if m.num_curves() > MAX_CURVES {
+        bail!("too many curves in one mobject (limit {MAX_CURVES})");
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------- handles
 
+fn free_slots(slots: &[Slot]) -> Vec<u32> {
+    slots.iter().enumerate().filter(|(_, s)| matches!(s, Slot::Free)).map(|(i, _)| i as u32).rev().collect()
+}
+
 fn new_handle(st: &mut State, slot: Slot) -> u32 {
-    let h = st.slots.len() as u32;
-    if let Slot::Attached(id) = slot {
+    let attached = if let Slot::Attached(id) = &slot { Some(*id) } else { None };
+    let h = match st.free.pop() {
+        Some(h) => {
+            st.slots[h as usize] = slot;
+            h
+        }
+        None => {
+            st.slots.push(slot);
+            (st.slots.len() - 1) as u32
+        }
+    };
+    if let Some(id) = attached {
         st.by_id.insert(id, h);
     }
-    st.slots.push(slot);
     h
 }
 
-fn slot(st: &State, h: u32) -> Result<Slot> {
+/// The JS object behind handle `h` (made in run `epoch`) was garbage collected. Detached
+/// values and views nobody points at are freed for reuse; mobjects the scene owns stay.
+fn release_handle(st: &mut State, h: u32, epoch: u32) {
+    if epoch != st.epoch {
+        return;
+    }
+    if matches!(st.slots.get(h as usize), Some(Slot::Detached(_) | Slot::View { .. })) {
+        st.released.push(h);
+    }
+    // Sweeping is O(slots): do it once a good share of the table is waiting.
+    if st.released.len() >= 16 && st.released.len() * 4 >= st.slots.len() {
+        sweep(st);
+    }
+}
+
+fn sweep(st: &mut State) {
+    loop {
+        // Roots that views point at, including members popped out for a play or on loan.
+        let popped = st.playbacks.values().flat_map(|(_, pops)| pops).chain(&st.loans).map(|p| p.root);
+        let referenced: std::collections::HashSet<u32> = st
+            .slots
+            .iter()
+            .filter_map(|s| match s {
+                Slot::View { root, .. } => Some(*root),
+                _ => None,
+            })
+            .chain(popped)
+            .collect();
+        let mut freed = false;
+        let mut keep = Vec::new();
+        for h in std::mem::take(&mut st.released) {
+            match st.slots.get(h as usize) {
+                Some(Slot::Detached(_) | Slot::View { .. }) if referenced.contains(&h) => keep.push(h),
+                Some(Slot::Detached(_) | Slot::View { .. }) => {
+                    st.slots[h as usize] = Slot::Free;
+                    st.free.push(h);
+                    freed = true;
+                }
+                _ => {}
+            }
+        }
+        st.released = keep;
+        // Freeing a view can leave its (already collected) group unreferenced.
+        if !freed || st.released.is_empty() {
+            return;
+        }
+    }
+}
+
+/// What a live slot holds, without the mobject itself (copying a detached mobject just to
+/// look at its kind was a deep clone per script call).
+enum Kind {
+    Detached,
+    Attached(MobjectId),
+    View { root: u32, path: Vec<usize> },
+}
+
+fn slot(st: &State, h: u32) -> Result<Kind> {
     match st.slots.get(h as usize) {
         Some(Slot::Free) | None => bail!("mobject handle {h} is not valid"),
         // After a seek the world is an earlier keyframe: mobjects created later are gone.
         Some(Slot::Attached(id)) if st.scene.as_ref().is_some_and(|s| !s.world().contains(*id)) => {
             bail!("mobject handle {h} refers to a mobject that does not exist at this point of the scene")
         }
-        Some(s) => Ok(s.clone()),
+        Some(Slot::Detached(_)) => Ok(Kind::Detached),
+        Some(Slot::Attached(id)) => Ok(Kind::Attached(*id)),
+        Some(Slot::View { root, path }) => Ok(Kind::View { root: *root, path: path.clone() }),
     }
 }
 
@@ -221,14 +327,13 @@ fn resolve(st: &State, h: u32) -> Result<(Base, Vec<usize>)> {
             bail!("mobject handle {h} is part of a group cycle");
         }
         let base = match slot(st, cur)? {
-            Slot::Detached(_) => Base::Detached(cur),
-            Slot::Attached(id) => Base::World(id),
-            Slot::View { root, path } => {
+            Kind::Detached => Base::Detached(cur),
+            Kind::Attached(id) => Base::World(id),
+            Kind::View { root, path } => {
                 paths.push(path);
                 cur = root;
                 continue;
             }
-            Slot::Free => bail!("mobject handle {cur} was freed"),
         };
         let p = paths.into_iter().rev().flatten().collect();
         return Ok((base, p));
@@ -243,7 +348,7 @@ fn is_self_or_ancestor(st: &State, h: u32, ancestor: u32) -> Result<bool> {
             return Ok(true);
         }
         match slot(st, cur)? {
-            Slot::View { root, .. } => cur = root,
+            Kind::View { root, .. } => cur = root,
             _ => return Ok(false),
         }
     }
@@ -277,19 +382,24 @@ fn get_mob(st: &mut State, h: u32) -> Result<VMobject> {
 /// World id for a handle, inserting it if needed (`show` displays new ones).
 /// Views are popped out of their group; the pops are returned for `push_back`.
 fn ensure_in_world(st: &mut State, h: u32, show: bool, pops: &mut Vec<Pop>) -> Result<MobjectId> {
-    if !matches!(slot(st, h)?, Slot::Attached(_)) {
+    if !matches!(slot(st, h)?, Kind::Attached(_)) {
         reclaim_loans(st, h)?;
     }
     match slot(st, h)? {
-        Slot::Attached(id) => Ok(id),
-        Slot::Detached(m) => {
+        Kind::Attached(id) => Ok(id),
+        Kind::Detached => {
+            // Move the mobject into the world (the slot is Attached right after).
+            scene(st)?;
+            let Slot::Detached(m) = std::mem::replace(&mut st.slots[h as usize], Slot::Free) else {
+                unreachable!("slot() said Detached")
+            };
             let s = scene(st)?;
             let id = if show { s.add(m) } else { s.insert(m) };
             st.slots[h as usize] = Slot::Attached(id);
             st.by_id.insert(id, h);
             Ok(id)
         }
-        Slot::View { root, path } => {
+        Kind::View { root, path } => {
             let sub = with_mob(st, h, |m| std::mem::replace(m, VMobject::group(vec![])))?;
             let root_shown = is_shown(st, root)?;
             let s = scene(st)?;
@@ -299,7 +409,6 @@ fn ensure_in_world(st: &mut State, h: u32, show: bool, pops: &mut Vec<Pop>) -> R
             pops.push(Pop { handle: h, root, path, id });
             Ok(id)
         }
-        Slot::Free => unreachable!(),
     }
 }
 
@@ -612,7 +721,14 @@ fn apply_op(m: VMobject, name: &str, args: &[Value], refs: &Refs) -> Result<VMob
             }
             m
         }
-        "insertCurves" => m.insert_curves(count(arg_num(args, 0, 2.0), 1, 10_000)),
+        "insertCurves" => {
+            let n = count(arg_num(args, 0, 2.0), 1, 10_000);
+            // Check before allocating: this multiplies the curve count by `n`.
+            if m.num_curves().saturating_mul(n) > MAX_CURVES {
+                bail!("too many curves in one mobject (limit {MAX_CURVES})");
+            }
+            m.insert_curves(n)
+        }
         "setKind" => m.with_kind(arg(args, 0).as_str().unwrap_or("VMobject")),
         "setLabel" => m.with_label(arg(args, 0).as_str().unwrap_or("")),
         "setRowColors" => m.set_row_colors(&colors_arg(arg(args, 0))?),
@@ -1395,8 +1511,11 @@ fn build_anim(st: &mut State, spec: &Value, pops: &mut Vec<Pop>) -> Result<Built
             Box::new(MoveAlongPath::new(id, path))
         }
         "ChangeValue" => {
-            let t = opt_num(spec, "tracker").context("ChangeValue needs a tracker")? as usize;
-            let tracker = scene(st)?.tracker_id(t)?;
+            let t = opt_num(spec, "tracker").context("ChangeValue needs a tracker")?;
+            if !(t.is_finite() && t >= 0.0 && t.fract() == 0.0) {
+                bail!("ChangeValue: {t} is not a value tracker");
+            }
+            let tracker = scene(st)?.tracker_id(t as usize)?;
             Box::new(ChangeValue::new(tracker, opt_num(spec, "value").unwrap_or(0.0)))
         }
         "Wait" => Box::new(Wait::new(opt_num(spec, "runTime").unwrap_or(1.0))),
@@ -1454,16 +1573,9 @@ macro_rules! reg {
 /// Run a native call, turning a Rust panic into a script error instead of unwinding
 /// into QuickJS and the host application.
 fn guard<T>(name: &str, f: impl FnOnce() -> Result<T>) -> Result<T> {
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+    match crate::guard::catch(f) {
         Ok(r) => r,
-        Err(p) => {
-            let msg = p
-                .downcast_ref::<&str>()
-                .map(|s| s.to_string())
-                .or_else(|| p.downcast_ref::<String>().cloned())
-                .unwrap_or_else(|| "unknown panic".into());
-            Err(anyhow!("internal error in {name}: {msg}"))
-        }
+        Err(msg) => Err(anyhow!("internal error in {name}: {msg}")),
     }
 }
 
@@ -1487,6 +1599,7 @@ pub(crate) fn install(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
             let mut refs = HashMap::new();
             collect_refs(st, &o, &mut refs)?;
             let m = make(st, &kind, &o, &Refs(refs))?;
+            check_size(&m)?;
             Ok(new_handle(st, Slot::Detached(m)))
         })
     });
@@ -1495,15 +1608,18 @@ pub(crate) fn install(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
         let args = parse(&args)?;
         let args = args.as_array().cloned().unwrap_or_default();
         with_state(|st| {
-            let m = get_mob(st, h)?;
-            if let Some(v) = query(&m, &name, &args)? {
+            // Questions are answered from the mobject where it lives, without copying it.
+            if let Some(v) = with_mob(st, h, |m| query(m, &name, &args))?? {
                 return Ok(v.to_string());
             }
             let mut refs = HashMap::new();
             for a in &args {
                 collect_refs(st, a, &mut refs)?;
             }
+            // The one copy: ops build a new mobject, and a failing op must leave the old one intact.
+            let m = get_mob(st, h)?;
             let new = apply_op(m, &name, &args, &Refs(refs))?;
+            check_size(&new)?;
             with_mob(st, h, |m| *m = new)?;
             Ok(String::new())
         })
@@ -1522,7 +1638,7 @@ pub(crate) fn install(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
             let mut shown = Vec::new();
             for &h in &hs {
                 children.push(get_mob(st, h)?);
-                if let (Base::World(id), true) = (resolve(st, h)?.0, matches!(slot(st, h)?, Slot::Attached(_))) {
+                if let (Base::World(id), true) = (resolve(st, h)?.0, matches!(slot(st, h)?, Kind::Attached(_))) {
                     if scene(st)?.world().is_displayed(id) {
                         first_shown.get_or_insert(id);
                         shown.push(id);
@@ -1530,6 +1646,7 @@ pub(crate) fn install(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
                 }
             }
             let g = VMobject::group(children);
+            check_size(&g)?;
             let gh = match first_shown {
                 Some(first) => {
                     let s = scene(st)?;
@@ -1553,14 +1670,32 @@ pub(crate) fn install(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
         let hs: Vec<u32> = serde_json::from_str(&handles).context("handles")?;
         with_state(|st| {
             let base = with_mob(st, h, |m| m.children.len())?;
+            // Levels above `h` inside its root, plus `h` itself.
+            let above = resolve(st, h)?.1.len() + 1;
             for &c in &hs {
                 if is_self_or_ancestor(st, h, c)? {
                     bail!("cannot add a group to itself or to one of its own members");
                 }
+                let child = get_mob(st, c)?;
+                if above + child.depth() > MAX_NESTING {
+                    bail!("groups nested more than {MAX_NESTING} levels deep are not supported");
+                }
+                // A big child added to a big group is how sizes double (`g.add(g.copy())`).
+                let curves = child.num_curves();
+                if curves > 1000 {
+                    let root = resolve(st, h)?.0;
+                    let total = match root {
+                        Base::Detached(r) => with_mob(st, r, |m| m.num_curves())?,
+                        Base::World(id) => scene(st)?.world().try_get(id)?.num_curves(),
+                    };
+                    if total + curves > MAX_CURVES {
+                        bail!("too many curves in one mobject (limit {MAX_CURVES})");
+                    }
+                }
             }
             for (k, &c) in hs.iter().enumerate() {
                 let m = get_mob(st, c)?;
-                if let Slot::Attached(id) = slot(st, c)? {
+                if let Kind::Attached(id) = slot(st, c)? {
                     scene(st)?.world_mut().remove_everywhere(id);
                 }
                 with_mob(st, h, |g| g.children.push(m))?;
@@ -1595,16 +1730,16 @@ pub(crate) fn install(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
         Ok(new_handle(st, Slot::Detached(m.part(&needle))))
     }));
 
-    reg!(ctx, n, "release", |h: u32| with_state(|st| {
-        // Free only detached values nobody else can reach.
-        if matches!(st.slots.get(h as usize), Some(Slot::Detached(_))) {
-            let referenced = st.slots.iter().any(|s| matches!(s, Slot::View { root, .. } if *root == h));
-            if !referenced {
-                st.slots[h as usize] = Slot::Free;
-            }
-        }
+    // The JS object behind handle `h` was collected (see the FinalizationRegistry in the prelude).
+    reg!(ctx, n, "release", |h: u32, epoch: u32| with_state(|st| {
+        release_handle(st, h, epoch);
         Ok(())
     }));
+
+    reg!(ctx, n, "epoch", || with_state(|st| Ok(st.epoch)));
+
+    // Handles in use; lets tests check that discarded temporaries are reclaimed.
+    reg!(ctx, n, "liveHandles", || with_state(|st| Ok(st.live_handles() as u32)));
 
     // ---- scene
 
@@ -1613,7 +1748,7 @@ pub(crate) fn install(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
         with_state(|st| {
             for h in hs {
                 match slot(st, h)? {
-                    Slot::Attached(id) => scene(st)?.world_mut().bring_to_front(id),
+                    Kind::Attached(id) => scene(st)?.world_mut().bring_to_front(id),
                     _ => {
                         let mut pops = Vec::new();
                         let id = ensure_in_world(st, h, true, &mut pops)?;
@@ -1630,8 +1765,8 @@ pub(crate) fn install(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
         with_state(|st| {
             for h in hs {
                 match slot(st, h)? {
-                    Slot::Attached(id) => scene(st)?.remove(id),
-                    Slot::View { .. } => {
+                    Kind::Attached(id) => scene(st)?.remove(id),
+                    Kind::View { .. } => {
                         let sub = with_mob(st, h, |m| std::mem::replace(m, VMobject::group(vec![])))?;
                         st.slots[h as usize] = Slot::Detached(sub);
                     }
@@ -1843,6 +1978,9 @@ pub(crate) fn install(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
         eprintln!("{msg}");
         Ok(())
     });
+
+    // Run queued finalizer jobs (the prelude's FinalizationRegistry callbacks).
+    n.set("collect", Function::new(ctx.clone(), |ctx: Ctx<'_>| while ctx.execute_pending_job() {})?)?;
 
     ctx.globals().set("__manim_native", n)?;
     Ok(())

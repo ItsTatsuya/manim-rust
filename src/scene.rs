@@ -28,13 +28,14 @@ use crate::camera::Camera;
 use crate::check::{self, Checker, Problem};
 use crate::config::{Config, SnapshotAt};
 use crate::events::Events;
-use crate::mobject::VMobject;
+use crate::mobject::{VMobject, MAX_NESTING};
 use crate::output;
 use crate::pipeline::Pipeline;
 use crate::renderer::{self, DisplayList};
 use crate::theme::Theme;
 use crate::world::{MobjectId, TrackerId, World};
 
+/// Handle to an updater registered with `Scene::add_updater`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct UpdaterId(usize);
 
@@ -49,7 +50,9 @@ struct UpdaterSlot {
 /// A named moment on the timeline (`mark`) or the start of a chapter (`section`).
 #[derive(Clone, Debug, Serialize)]
 pub struct Marker {
+    /// Marker or section name.
     pub name: String,
+    /// Scene time in seconds.
     pub time: f64,
     /// `"marker"` or `"section"`.
     pub kind: String,
@@ -58,25 +61,40 @@ pub struct Marker {
 /// One `play` or `wait` as it happened.
 #[derive(Clone, Debug, Serialize)]
 pub struct PlayInfo {
+    /// Position in the play log.
     pub index: usize,
+    /// Animation name (`Wait` for waits).
     pub name: String,
+    /// Scene time in seconds when it starts.
     pub start: f64,
+    /// Duration in seconds.
     pub run_time: f64,
+    /// Number of frames it spans.
     pub frames: usize,
+    /// True for `wait`, false for `play`.
     pub wait: bool,
 }
 
 /// Everything a host needs to know about a finished (or running) scene's timeline.
 #[derive(Clone, Debug, Serialize)]
 pub struct TimelineInfo {
+    /// Scene name.
     pub scene: String,
+    /// Frames per second.
     pub fps: f64,
+    /// Frame width in pixels.
     pub width: u32,
+    /// Frame height in pixels.
     pub height: u32,
+    /// Total length in seconds.
     pub duration: f64,
+    /// Every `play` and `wait`, in order.
     pub plays: Vec<PlayInfo>,
+    /// Markers and sections, in order.
     pub markers: Vec<Marker>,
+    /// Sounds placed on the timeline.
     pub sounds: Vec<SoundInfo>,
+    /// Layout problems found (needs `Config::check`).
     pub problems: Vec<Problem>,
 }
 
@@ -133,6 +151,7 @@ impl Playback {
     pub fn frame(&self) -> usize {
         self.i
     }
+    /// Whether every frame of this play has been produced.
     pub fn is_finished(&self) -> bool {
         self.finished
     }
@@ -195,6 +214,7 @@ pub fn render(name: &str, construct: impl FnOnce(&mut Scene)) -> Result<()> {
     render_with(&Config::from_args()?, name, construct)
 }
 
+/// Like [`render`], with an explicit `config` instead of command-line arguments.
 pub fn render_with(config: &Config, name: &str, construct: impl FnOnce(&mut Scene)) -> Result<()> {
     if config.gpu_info {
         print!("{}", renderer::gpu_report());
@@ -221,7 +241,20 @@ pub fn render_with(config: &Config, name: &str, construct: impl FnOnce(&mut Scen
     result
 }
 
+/// Run animation code so that a panic in it (a stale mobject id, an animation bug)
+/// becomes the scene's error instead of unwinding into the host. `None` if it panicked.
+fn contain<R>(error: &mut Option<anyhow::Error>, what: &str, f: impl FnOnce() -> R) -> Option<R> {
+    match crate::guard::catch(f) {
+        Ok(r) => Some(r),
+        Err(msg) => {
+            error.get_or_insert_with(|| anyhow!("{what}: internal error: {msg}"));
+            None
+        }
+    }
+}
+
 impl Scene {
+    /// Create a scene for `config` (validated first). Fails on an invalid config or when the renderer or writer cannot start.
     pub fn new(config: &Config, name: &str) -> Result<Self> {
         config.validate()?;
         if let Some(p) = &config.ffmpeg {
@@ -232,19 +265,20 @@ impl Scene {
         // GPU device creation, encoder probing (spawns ffmpeg) and system font loading are
         // each a few hundred ms; do them concurrently.
         #[cfg(feature = "text")]
-        std::thread::spawn(crate::text::preload_fonts);
+        let _ = std::thread::Builder::new().name("manim-fonts".into()).spawn(crate::text::preload_fonts);
         let pipeline = if config.dry_run {
             None
         } else {
             let (renderer, writer) = std::thread::scope(|scope| {
-                let writer = scope.spawn(|| -> Result<_> {
+                let writer = std::thread::Builder::new().spawn_scoped(scope, || -> Result<_> {
                     if !config.write_video {
                         return Ok(None);
                     }
                     let base = config.video_base(name);
-                    Ok(Some(output::create_writer(
+                    Ok(Some(output::create_writer_with(
                         config.format,
                         config.encoder,
+                        &config.x264,
                         &base,
                         config.pixel_width,
                         config.pixel_height,
@@ -252,9 +286,17 @@ impl Scene {
                     )?))
                 });
                 let renderer = renderer::create(config.renderer, config.pixel_width, config.pixel_height, events);
-                (renderer, writer.join().expect("writer setup panicked"))
+                let writer = match writer {
+                    Ok(handle) => handle.join().unwrap_or_else(|_| Err(anyhow!("output setup panicked"))),
+                    Err(e) => Err(anyhow!("cannot start the output setup thread: {e}")),
+                };
+                (renderer, writer)
             });
-            Some(Pipeline::new(renderer?, writer?))
+            let mut pipeline =
+                Pipeline::with_frame_size(renderer?, writer?, Some((config.pixel_width, config.pixel_height)))?;
+            let cfg = config.clone();
+            pipeline.set_interrupt(move || cfg.interrupted());
+            Some(pipeline)
         };
         let describe = pipeline.as_ref().map(|p| (p.renderer_name(), p.output_description()));
         let (renderer_name, output_name) = describe.unwrap_or_else(|| ("none".into(), "dry run".into()));
@@ -311,6 +353,7 @@ impl Scene {
         Ok(scene)
     }
 
+    /// The scene name.
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -324,14 +367,29 @@ impl Scene {
 
     /// Add and display a mobject.
     pub fn add(&mut self, m: impl Into<VMobject>) -> MobjectId {
-        let id = self.world.insert(m.into());
+        let m = self.checked_nesting(m.into());
+        let id = self.world.insert(m);
         self.world.show(id);
         id
     }
 
     /// Store a mobject without displaying it (e.g. a `ReplacementTransform` target).
     pub fn insert(&mut self, m: impl Into<VMobject>) -> MobjectId {
-        self.world.insert(m.into())
+        let m = self.checked_nesting(m.into());
+        self.world.insert(m)
+    }
+
+    /// A mobject nested deeper than [`MAX_NESTING`] would overflow the stack in the
+    /// recursive code that clones, compares and drops it: refuse it, and fail the
+    /// render with an error instead.
+    fn checked_nesting(&mut self, m: VMobject) -> VMobject {
+        if m.depth() <= MAX_NESTING {
+            return m;
+        }
+        self.error.get_or_insert_with(|| anyhow!("a mobject is nested more than {MAX_NESTING} groups deep"));
+        // Dropping it would recurse as deep as it is nested; leaking it is the safe way out.
+        std::mem::forget(m);
+        VMobject::group(Vec::new())
     }
 
     /// Re-display a stored mobject.
@@ -339,6 +397,7 @@ impl Scene {
         self.world.show(id);
     }
 
+    /// Remove `id` from every layer (scene, background and overlay).
     pub fn remove(&mut self, id: MobjectId) {
         self.world.remove_everywhere(id);
     }
@@ -348,10 +407,12 @@ impl Scene {
         self.world.clear();
     }
 
+    /// Move `id` to the top of the draw order.
     pub fn bring_to_front(&mut self, id: MobjectId) {
         self.world.bring_to_front(id);
     }
 
+    /// Move `id` to the bottom of the draw order.
     pub fn bring_to_back(&mut self, id: MobjectId) {
         self.world.bring_to_back(id);
     }
@@ -375,6 +436,7 @@ impl Scene {
         self.world.displayed().to_vec()
     }
 
+    /// The mobject stored under `id`. Panics if it does not exist.
     pub fn get(&self, id: MobjectId) -> &VMobject {
         &self.world[id]
     }
@@ -384,24 +446,27 @@ impl Scene {
         self.world.modify(id, f);
     }
 
+    /// The underlying world.
     pub fn world(&self) -> &World {
         &self.world
     }
 
+    /// Mutable access to the underlying world.
     pub fn world_mut(&mut self) -> &mut World {
         &mut self.world
     }
 
+    /// The camera (frame size, center and background).
     pub fn camera(&mut self) -> &mut Camera {
         &mut self.camera
     }
 
-    /// Elapsed scene time in seconds.
     /// Whether the render was cancelled or passed its deadline (see [`Config::deadline`]).
     pub fn is_interrupted(&self) -> bool {
         self.config.interrupted()
     }
 
+    /// Elapsed scene time in seconds.
     pub fn time(&self) -> f64 {
         self.time
     }
@@ -411,6 +476,7 @@ impl Scene {
         self.duration
     }
 
+    /// The configuration this scene was created with.
     pub fn config(&self) -> &Config {
         &self.config
     }
@@ -437,10 +503,12 @@ impl Scene {
         self.theme = Some(theme);
     }
 
+    /// The applied theme, if any.
     pub fn theme(&self) -> Option<&Theme> {
         self.theme.as_ref()
     }
 
+    /// Set the frame background color (alpha is ignored).
     pub fn set_background_color(&mut self, c: crate::color::Color) {
         self.camera.background = c;
     }
@@ -452,10 +520,12 @@ impl Scene {
         self.world.tracker(v)
     }
 
+    /// Value of tracker `t`.
     pub fn value(&self, t: TrackerId) -> f64 {
         self.world.value(t)
     }
 
+    /// Set the value of tracker `t`.
     pub fn set_value(&mut self, t: TrackerId, v: f64) {
         self.world.set_value(t, v);
     }
@@ -486,6 +556,7 @@ impl Scene {
         id
     }
 
+    /// Stop and drop updater `id` (kept inactive when recording so earlier segments replay correctly).
     pub fn remove_updater(&mut self, id: UpdaterId) {
         if self.config.record {
             // Keep it for replaying earlier segments.
@@ -495,6 +566,7 @@ impl Scene {
         }
     }
 
+    /// Stop and drop all updaters.
     pub fn clear_updaters(&mut self) {
         if self.config.record {
             self.updaters.iter_mut().for_each(|u| u.active = false);
@@ -551,6 +623,7 @@ impl Scene {
         t
     }
 
+    /// Markers and sections recorded so far.
     pub fn markers(&self) -> &[Marker] {
         &self.markers
     }
@@ -587,6 +660,7 @@ impl Scene {
         self.sounds.push(s);
     }
 
+    /// Sounds added so far.
     pub fn sounds(&self) -> &[Sound] {
         &self.sounds
     }
@@ -603,6 +677,7 @@ impl Scene {
         self.checker.as_ref().map(|c| c.problems()).unwrap_or(&[])
     }
 
+    /// Snapshot of the timeline: plays, markers, sounds and problems.
     pub fn timeline(&self) -> TimelineInfo {
         TimelineInfo {
             scene: self.name.clone(),
@@ -696,8 +771,16 @@ impl Scene {
     pub fn begin_play(&mut self, anims: impl IntoAnimations) -> Playback {
         self.leave_seek();
         let mut group = AnimationGroup::new(anims);
-        group.resolve(&self.world);
-        let mut run_time = group.config().run_time.max(0.0);
+        let world = &self.world;
+        let g = &mut group;
+        let mut usable = contain(&mut self.error, "play", || g.resolve(world)).is_some();
+        if usable {
+            if let Err(e) = group.validate(&self.world) {
+                self.error.get_or_insert(e.context("play"));
+                usable = false;
+            }
+        }
+        let mut run_time = if usable { group.config().run_time.max(0.0) } else { 0.0 };
         if !run_time.is_finite() {
             self.error.get_or_insert_with(|| anyhow!("play: run_time must be finite (got {run_time})"));
             run_time = 0.0;
@@ -716,7 +799,11 @@ impl Scene {
                 updaters: self.active_updaters(),
             });
         }
-        group.begin(&mut self.world);
+        if usable {
+            let world = &mut self.world;
+            let g = &mut group;
+            contain(&mut self.error, "play", || g.begin(world));
+        }
         let start = self.time;
         let plays = self.play_log.iter().filter(|p| !p.wait).count();
         self.events.emit(
@@ -794,7 +881,8 @@ impl Scene {
         if p.i >= p.stop || failed {
             if p.stop == p.frames || failed {
                 if let Some(a) = &mut p.anim {
-                    a.clean_up(&mut self.world);
+                    let world = &mut self.world;
+                    contain(&mut self.error, "play", || a.clean_up(world));
                 }
                 if !p.replay {
                     self.after_play(p);
@@ -805,7 +893,8 @@ impl Scene {
         }
         p.i += 1;
         if let Some(a) = &mut p.anim {
-            a.interpolate(&mut self.world, p.i as f64 / p.frames as f64);
+            let (world, t) = (&mut self.world, p.i as f64 / p.frames as f64);
+            contain(&mut self.error, "play", || a.interpolate(world, t));
         }
         Some(p.dt)
     }
@@ -905,14 +994,16 @@ impl Scene {
         };
         let s = &self.segments[k];
         let end = s.start + s.frames as f64 * dt;
-        if t >= end - 1e-9 && k + 1 == self.segments.len() {
+        if t >= end - dt - 1e-9 && k + 1 == self.segments.len() {
             let (w, time, view) = self.end_state.clone().unwrap();
             self.world = w;
             self.time = time;
             view.apply(&mut self.camera);
             return Ok(done(0));
         }
-        let stop = (((t - s.start) / dt) + 1e-6).floor().clamp(0.0, s.frames as f64) as usize;
+        // Exported frame k shows the state after k + 1 steps (see `end_frame`), so the
+        // frame at time t = k / fps is the one after floor(t / dt) + 1.
+        let stop = ((((t - s.start) / dt) + 1e-6).floor() + 1.0).clamp(0.0, s.frames as f64) as usize;
         self.world = s.world.clone();
         self.time = s.start;
         s.view.apply(&mut self.camera);
@@ -947,7 +1038,9 @@ impl Scene {
         }
     }
 
-    /// Jump to time `t` (needs [`Config::record`]): the world becomes what frame `t` shows.
+    /// Jump to time `t` (needs [`Config::record`]): the world becomes what the exported
+    /// frame at `t` shows. Frame `k` of the video (`k / fps` seconds in) is the state after
+    /// `k + 1` frame steps, so `seek(k / fps)` and exported frame `k` match exactly.
     pub fn seek(&mut self, t: f64) -> Result<()> {
         let mut p = self.seek_begin(t)?;
         while let Some(dt) = self.step(&mut p) {
@@ -956,7 +1049,8 @@ impl Scene {
         Ok(())
     }
 
-    /// The frame at time `t`, rasterized on the CPU (needs [`Config::record`]).
+    /// The frame at time `t`, rasterized on the CPU (needs [`Config::record`]); identical to
+    /// exported frame `floor(t * fps)`.
     pub fn frame_at(&mut self, t: f64) -> Result<Vec<u8>> {
         self.seek(t)?;
         Ok(self.render_frame())

@@ -27,8 +27,10 @@ pub const BACKGROUNDS: &str = "TableBackgrounds";
 pub trait GridMobject: Sized {
     /// The group holding every entry, row by row (`table.elements` in Manim).
     fn grid_entries(&self) -> Option<&VMobject>;
+    /// Mutable access to the entries group.
     fn grid_entries_mut(&mut self) -> Option<&mut VMobject>;
 
+    /// Row/column layout of the table or matrix, if it has one.
     fn grid(&self) -> Option<Grid> {
         self.grid_entries().and_then(|e| e.meta.grid)
     }

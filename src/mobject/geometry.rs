@@ -35,8 +35,10 @@ fn stroked(subpaths: Vec<Subpath>, color: Color) -> VMobject {
     VMobject { stroke_color: color, fill_color: color, ..VMobject::from_subpaths(subpaths) }
 }
 
+/// A circular arc (Manim's `Arc`). Constructors return a [`VMobject`].
 pub struct Arc;
 impl Arc {
+    /// Arc of `radius` around the origin, from `start_angle` sweeping `angle` radians (counter-clockwise if positive).
     pub fn new(radius: f64, start_angle: f64, angle: f64) -> VMobject {
         stroked(vec![Subpath::new(arc_curves(ORIGIN, radius, start_angle, angle), false)], crate::defaults::color())
     }
@@ -45,6 +47,7 @@ impl Arc {
 /// Arc from `a` to `b` bulging by `angle`.
 pub struct ArcBetweenPoints;
 impl ArcBetweenPoints {
+    /// Arc from `a` to `b` bending by `angle` radians; a straight line when `angle` is ~0 or `a == b`.
     pub fn new(a: Point, b: Point, angle: f64) -> VMobject {
         let chord = b - a;
         let len = chord.length();
@@ -61,25 +64,32 @@ impl ArcBetweenPoints {
     }
 }
 
+/// A circle (Manim's `Circle`).
 pub struct Circle;
 impl Circle {
+    /// Circle of `radius` at the origin, outlined in red and unfilled.
     pub fn new(radius: f64) -> VMobject {
         stroked(vec![Subpath::new(arc_curves(ORIGIN, radius, 0.0, TAU), true)], RED)
     }
 }
 
+/// An ellipse (Manim's `Ellipse`).
 pub struct Ellipse;
 impl Ellipse {
+    /// Ellipse with the given full `width` and `height` at the origin.
     pub fn new(width: f64, height: f64) -> VMobject {
         Circle::new(1.0).stretch(width / 2.0, 0).stretch(height / 2.0, 1).set_color(crate::defaults::color())
     }
 }
 
+/// A small filled circle (Manim's `Dot`).
 pub struct Dot;
 impl Dot {
+    /// A dot at the origin.
     pub fn new() -> VMobject {
         Self::at(ORIGIN)
     }
+    /// A dot at `p`.
     pub fn at(p: Point) -> VMobject {
         Circle::new(DEFAULT_DOT_RADIUS).set_fill(crate::defaults::color(), 1.0).set_stroke_width(0.0).move_to(p)
     }
@@ -88,6 +98,7 @@ impl Dot {
 /// Ring between two radii (filled with even-odd).
 pub struct Annulus;
 impl Annulus {
+    /// Ring with the given inner and outer radius at the origin.
     pub fn new(inner: f64, outer: f64) -> VMobject {
         let mut m = stroked(
             vec![
@@ -102,8 +113,10 @@ impl Annulus {
     }
 }
 
+/// A filled circular sector (Manim's `Sector`).
 pub struct Sector;
 impl Sector {
+    /// Sector of `radius` from `start_angle` sweeping `angle` radians, with its apex at the origin.
     pub fn new(radius: f64, start_angle: f64, angle: f64) -> VMobject {
         let mut curves = arc_curves(ORIGIN, radius, start_angle, angle);
         let end = curves.last().unwrap()[3];
@@ -117,25 +130,32 @@ impl Sector {
     }
 }
 
+/// A closed polygon through its vertices (Manim's `Polygon`).
 pub struct Polygon;
 impl Polygon {
+    /// Polygon through `vertices`, in order.
     pub fn new(vertices: &[Point]) -> VMobject {
         stroked(vec![Subpath::polyline(vertices, true)], BLUE)
     }
 }
 
+/// An open path of straight segments (Manim's `Polyline`).
 pub struct Polyline;
 impl Polyline {
+    /// Polyline through `points`.
     pub fn new(points: &[Point]) -> VMobject {
         stroked(vec![Subpath::polyline(points, false)], crate::defaults::color())
     }
 }
 
+/// A regular polygon (Manim's `RegularPolygon`).
 pub struct RegularPolygon;
 impl RegularPolygon {
+    /// Regular `n`-gon (at least 3 sides) with radius 1.
     pub fn new(n: usize) -> VMobject {
         Self::with_radius(n, 1.0)
     }
+    /// Regular `n`-gon with the given circumradius.
     pub fn with_radius(n: usize, radius: f64) -> VMobject {
         let n = n.max(3);
         let start = if n.is_multiple_of(2) { 0.0 } else { 90.0 * DEGREES };
@@ -149,15 +169,19 @@ impl RegularPolygon {
     }
 }
 
+/// An equilateral triangle (Manim's `Triangle`).
 pub struct Triangle;
 impl Triangle {
+    /// Triangle with radius 1, pointing up.
     pub fn new() -> VMobject {
         RegularPolygon::new(3)
     }
 }
 
+/// A star (Manim's `Star`).
 pub struct Star;
 impl Star {
+    /// Star with `points` tips, `outer` tip radius and `inner` valley radius.
     pub fn new(points: usize, outer: f64, inner: f64) -> VMobject {
         let n = points.max(2);
         let verts: Vec<Point> = (0..2 * n)
@@ -171,23 +195,29 @@ impl Star {
     }
 }
 
+/// A rectangle (Manim's `Rectangle`).
 pub struct Rectangle;
 impl Rectangle {
+    /// Rectangle of `width` by `height` centered on the origin.
     pub fn new(width: f64, height: f64) -> VMobject {
         let (w, h) = (width / 2.0, height / 2.0);
         Polygon::new(&[pt(w, h), pt(-w, h), pt(-w, -h), pt(w, -h)]).set_color(crate::defaults::color())
     }
 }
 
+/// A square (Manim's `Square`).
 pub struct Square;
 impl Square {
+    /// Square with side length `side` centered on the origin.
     pub fn new(side: f64) -> VMobject {
         Rectangle::new(side, side)
     }
 }
 
+/// A rectangle with rounded corners (Manim's `RoundedRectangle`).
 pub struct RoundedRectangle;
 impl RoundedRectangle {
+    /// Rectangle with corners rounded by `corner_radius` (limited to half the shorter side).
     pub fn new(width: f64, height: f64, corner_radius: f64) -> VMobject {
         let (w, h) = (width / 2.0, height / 2.0);
         let r = corner_radius.min(w).min(h).max(0.0);
@@ -204,18 +234,23 @@ impl RoundedRectangle {
     }
 }
 
+/// A straight line segment (Manim's `Line`).
 pub struct Line;
 impl Line {
+    /// Line from `start` to `end`.
     pub fn new(start: Point, end: Point) -> VMobject {
         stroked(vec![Subpath::new(vec![bezier::line(start, end)], false)], crate::defaults::color())
     }
 }
 
+/// A dashed line (Manim's `DashedLine`).
 pub struct DashedLine;
 impl DashedLine {
+    /// Dashed line from `start` to `end` with default dashes (0.05 long, half the period).
     pub fn new(start: Point, end: Point) -> VMobject {
         Self::with_dash(start, end, 0.05, 0.5)
     }
+    /// Dashes of `dash_length` covering `dashed_ratio` of each period, from `start` to `end`.
     pub fn with_dash(start: Point, end: Point, dash_length: f64, dashed_ratio: f64) -> VMobject {
         let len = start.distance(end);
         let period = dash_length.abs().max(1e-4) / dashed_ratio.clamp(0.01, 1.0);
@@ -242,11 +277,14 @@ fn arrow_tip(base_dir: Point, end: Point, length: f64, color: Color) -> VMobject
     tip
 }
 
+/// A line with an arrow tip at its end (Manim's `Arrow`).
 pub struct Arrow;
 impl Arrow {
+    /// Arrow from `start` to `end`, leaving a small gap at both ends.
     pub fn new(start: Point, end: Point) -> VMobject {
         Self::with_buff(start, end, MED_SMALL_BUFF)
     }
+    /// Arrow from `start` to `end`, leaving `buff` at both ends (at most a quarter of the length).
     pub fn with_buff(start: Point, end: Point, buff: f64) -> VMobject {
         let v = end - start;
         let len = v.length();
@@ -267,13 +305,16 @@ impl Arrow {
 /// Arrow from the origin.
 pub struct Vector;
 impl Vector {
+    /// Arrow from the origin to `direction`, in yellow (Manim's `Vector`).
     pub fn new(direction: Point) -> VMobject {
         Arrow::with_buff(ORIGIN, direction, 0.0).set_color(YELLOW)
     }
 }
 
+/// A line with tips at both ends (Manim's `DoubleArrow`).
 pub struct DoubleArrow;
 impl DoubleArrow {
+    /// Double arrow from `start` to `end`.
     pub fn new(start: Point, end: Point) -> VMobject {
         let v = end - start;
         let len = v.length();
@@ -297,9 +338,11 @@ impl DoubleArrow {
 /// Rectangle around a mobject.
 pub struct SurroundingRectangle;
 impl SurroundingRectangle {
+    /// Rectangle around `m` with a small gap.
     pub fn new(m: &VMobject) -> VMobject {
         Self::with_buff(m, SMALL_BUFF)
     }
+    /// Rectangle around `m` with `buff` scene units of padding.
     pub fn with_buff(m: &VMobject, buff: f64) -> VMobject {
         Rectangle::new(m.width() + 2.0 * buff, m.height() + 2.0 * buff).move_to(m.get_center()).set_color(YELLOW)
     }
@@ -308,6 +351,7 @@ impl SurroundingRectangle {
 /// Opaque rectangle behind a mobject.
 pub struct BackgroundRectangle;
 impl BackgroundRectangle {
+    /// A translucent black rectangle behind `m` (drawn one z level below it).
     pub fn new(m: &VMobject) -> VMobject {
         SurroundingRectangle::with_buff(m, SMALL_BUFF)
             .set_fill(BLACK, 0.75)
@@ -333,6 +377,7 @@ impl CurvedArrow {
         Self::with_tip_length(start, end, angle, 0.25)
     }
 
+    /// Like [`CurvedArrow::new`] with an explicit tip length (limited to 40% of the arc).
     pub fn with_tip_length(start: Point, end: Point, angle: f64, tip_length: f64) -> VMobject {
         let arc = ArcBetweenPoints::new(start, end, angle);
         let total: f64 = arc.subpaths.iter().flat_map(|s| &s.curves).map(bezier::length).sum();
