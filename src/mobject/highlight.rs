@@ -9,6 +9,7 @@
 
 /// Token classes, named after Pygments' token types.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum TokenKind {
     /// Plain text and identifiers (`Text`).
     Text,

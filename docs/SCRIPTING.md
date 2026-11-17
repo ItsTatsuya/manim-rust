@@ -127,7 +127,8 @@ All Manim flags work, plus:
 | `--fonts DIR` | Register a folder of font files (repeatable) |
 | `--scene NAME`, `--list-scenes` | Pick one scene / list them |
 | `--sandbox DIR` | Asset paths and imports must stay inside `DIR` |
-| `--timeout SECONDS` | Stop a script that runs too long (infinite loops) |
+| `--timeout SECONDS` | Stop a script that runs too long (infinite loops); a per-call limit that does not cover finishing the video |
+| `--x264-preset NAME`, `--crf N` | x264 quality settings (see the README) |
 
 ### Progress events (`--progress json`)
 
@@ -180,6 +181,8 @@ let on_screen = host.with_scene(|s| s.inspect());    // layout boxes
 - Seeking replays from the keyframe before `t` (one per play), so a jump costs at most one
   play's worth of scene logic, not rasterizing. Updaters run again while replaying, so they
   should depend on the scene, not on state they keep themselves.
+- `seek(t)` and `frame_at(t)` show exactly what exported frame `floor(t * fps)` shows
+  (frame `k` is `k / fps` seconds in), so a preview scrubbed to a time matches the video.
 - Sound: `scene.addSound("assets/x.wav")` from scripts, or
   `Scene::add_samples(samples, rate, channels, at, gain)` from the host (e.g. a TTS voice
   line); sounds are mixed and muxed into the MP4 with ffmpeg in one pass.
@@ -187,6 +190,24 @@ let on_screen = host.with_scene(|s| s.inspect());    // layout boxes
   `add_overlay`, `mark`, `section`, `add_sound_at`, `inspect`, `problems`, `timeline`,
   `seek`, `frame_at`, and `begin_play` / `step` / `end_frame` for driving a play frame by
   frame.
+
+### Limits
+
+| Limit | Value |
+|---|---|
+| `HostOptions::timeout` | Per call, restarting each time: loading the script, `run`/`render` (the whole `construct()`, including the frames it rasterizes and writes), `seek`, `frame_at`. It does not cover `finish` (encoder flush, audio mux); stop that with `cancel_handle()` |
+| `HostOptions::memory_limit` | JS heap, default 512 MiB (`None` removes it). Mobject geometry lives in Rust and is bounded by the next rows |
+| Group nesting | 256 levels (`MAX_NESTING`) |
+| Curves per mobject | 1,000,000 when built by a script |
+| Typst markup (`MathTex`, `Typst`) | 64 KiB of markup, 30 s per compile; a compile stops when the script is cancelled or times out |
+| Frame size | 16384 pixels per side |
+| Frames in flight | about 512 MiB shared by the batch being drawn and the encoder queue |
+
+Exceeding a limit is an error from the call, not a panic. Panics from scene code are caught
+and returned as errors too, which relies on unwinding: a host must not be built with
+`panic = "abort"` (the `dist` profile no longer sets it). A script gets its own
+`script_cancel` / `script_deadline` next to `Config::cancel` / `Config::deadline`, so a
+host's flags and the script's never overwrite each other.
 
 ## Themes
 

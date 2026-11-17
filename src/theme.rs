@@ -135,6 +135,7 @@ impl Default for ThemeSizes {
 /// Background pattern drawn behind the scene.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum Pattern {
     /// Plain background.
     #[default]
@@ -148,6 +149,7 @@ pub enum Pattern {
 /// Where slide titles sit.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
 pub enum TitlePosition {
     /// Top-left, at the margin.
     #[default]
@@ -161,6 +163,7 @@ pub enum TitlePosition {
 /// How boxes around content are drawn.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum BoxStyle {
     /// Outline only.
     #[default]
@@ -240,6 +243,7 @@ pub struct Theme {
 
 /// The text roles a theme styles.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TextRole {
     /// Slide titles: heading font, title size, text color, semibold.
     Title,

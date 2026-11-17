@@ -120,9 +120,8 @@ Compile errors point at your `.rs` file. Every Manim flag works (`-ql`, `-s`,
 `--format gif`, …). The video goes next to the script unless you pass `-o` or `--media_dir`.
 
 The script is built against the engine source the runner was built from. If that directory
-is gone (a `cargo install` from crates.io, or a deleted checkout), `manim-rs` depends on the
-published `manim` crate of the same version instead, so the first render needs network
-access. Set `MANIM_RS_SOURCE=<checkout>` to build against a specific source tree.
+is gone (after `cargo install --git`, or a deleted checkout), `manim-rs` depends on the
+GitHub repository instead, so the first render needs network access. Set `MANIM_RS_SOURCE=<checkout>` to build against a specific source tree.
 
 Or use it as a library in your own Cargo project:
 

@@ -57,7 +57,9 @@ impl Image {
     }
 
     fn load(p: &Path) -> Result<Image> {
-        let dec = png::Decoder::new(std::io::BufReader::new(std::fs::File::open(p).with_context(|| p.display().to_string())?));
+        let dec = png::Decoder::new(std::io::BufReader::new(
+            std::fs::File::open(p).with_context(|| p.display().to_string())?,
+        ));
         let mut r = dec.read_info()?;
         let mut buf = vec![0; r.output_buffer_size().context("PNG too large")?];
         let info = r.next_frame(&mut buf)?;

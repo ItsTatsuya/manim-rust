@@ -15,6 +15,7 @@ use crate::renderer::RendererKind;
 
 /// Preset output sizes and frame rates, as in Manim's `-ql` ... `-qk` flags.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Quality {
     /// 854x480 @ 15 fps (`-ql`)
     Low,
@@ -158,6 +159,7 @@ impl Config {
 
 /// When to save a snapshot.
 #[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub enum SnapshotAt {
     /// Whenever the scene calls `mark`/`section`.
     Markers,

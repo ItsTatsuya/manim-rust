@@ -170,6 +170,7 @@ impl FramePool {
 }
 
 /// A rasterized frame after its per-frame post-processing (see [`Renderer::render_batch_with`]).
+#[non_exhaustive]
 pub enum Frame {
     /// Plain RGBA8, for writers that take it as is.
     Rgba(Vec<u8>),
@@ -208,6 +209,7 @@ pub trait Renderer: Send {
 
 /// Which backend [`create`] builds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RendererKind {
     /// Hardware GPU if one is found, otherwise CPU.
     Auto,

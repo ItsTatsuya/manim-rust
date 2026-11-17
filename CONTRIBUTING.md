@@ -4,11 +4,12 @@
 
 ```bash
 cargo build --release --examples
-cargo test --release                                  # full suite (79 tests)
+cargo test --release                                  # full suite
 cargo test --release -- --ignored                     # + end-to-end manim-rs runner test
 cargo test --release --no-default-features            # without GPU / text
 MANIM_FUZZ=20 cargo test --release --test fuzz        # 20× randomized soak
-cargo clippy --all-targets && cargo fmt --check
+cargo clippy --all-targets --all-features --locked -- -D warnings && cargo fmt --check
+RUSTDOCFLAGS="-D warnings" cargo doc --all-features --no-deps   # every public item needs a doc comment
 ```
 
 The tests skip themselves (with a message) when an optional dependency is missing: no
@@ -35,4 +36,5 @@ GPU adapter, no system fonts, or no ffmpeg.
 
 ## Style
 
-`cargo fmt` (120 columns, see `rustfmt.toml`) and a clean `cargo clippy --all-targets`.
+`cargo fmt` (120 columns, see `rustfmt.toml`), a clean `cargo clippy --all-targets --all-features`, and a doc comment on every public item (`missing_docs` is a lint here).
+The MSRV is `rust-version` in `Cargo.toml` (set by the newest dependency; CI checks it). Items public only for the tests or the CLI are `#[doc(hidden)]` and not part of the supported API.

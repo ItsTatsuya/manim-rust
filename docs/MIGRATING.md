@@ -93,4 +93,5 @@ script. Install the command once with `cargo install --path <manim-rust clone>`.
    Call `s.clear_updaters()` (or `remove_updater`) first.
 4. **Closures need `move`.** Ids, trackers and `Axes` values captured by updaters must be
    moved in. `Axes` is `Clone`, so clone it per closure.
-5. **No LaTeX yet.** Replace `MathTex(r"\theta^2")` with `Text("θ²")`.
+5. **Typst, not LaTeX.** Equations use Typst math syntax: write `MathTex::new("theta^2")` (feature `math`) instead of
+   `MathTex(r"	heta^2")`. Without that feature, use `Text("θ²")`.

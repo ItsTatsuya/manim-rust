@@ -10,6 +10,7 @@ use serde::Serialize;
 
 /// Where a sound's audio comes from.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum AudioSource {
     /// Any format ffmpeg reads (wav, mp3, ogg, flac, m4a...).
     File(PathBuf),

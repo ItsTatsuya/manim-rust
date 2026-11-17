@@ -10,6 +10,7 @@ use anyhow::{bail, Context, Result};
 
 /// Container a render is written as (see [`Config::format`](crate::config::Config::format)).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum OutputFormat {
     /// MP4 if ffmpeg is on PATH, otherwise GIF.
     Auto,
@@ -113,6 +114,7 @@ pub fn ffmpeg_available() -> bool {
 
 /// H.264 encoder used for MP4 output.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Encoder {
     /// First working hardware encoder (NVENC, Quick Sync, AMF), else x264.
     Auto,

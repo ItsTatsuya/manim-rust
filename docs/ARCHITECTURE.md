@@ -82,7 +82,8 @@ trait Animation {
 
 All channels are bounded, so a slow encoder applies backpressure instead of buffering
 gigabytes of frames. `plan_queues` sizes the batch and the encoder queue by bytes
-(`FRAME_MEMORY_BUDGET`, 512 MB), so 4K frames get a smaller batch than 1080p ones. Frame
+(`FRAME_MEMORY_BUDGET`, 512 MiB: the batch being drawn, the one finished before it and the
+encoder queue together), so 4K frames get a smaller batch than 1080p ones. Frame
 buffers are recycled through `FramePool` (only the last holder of a shared buffer returns it).
 With `-s` only the final display list is kept and rasterized.
 
@@ -101,7 +102,9 @@ Rust can't interpret a script, so `manim-rs scene.rs` does this:
 
 1. Writes a tiny Cargo project into the cache (`%LOCALAPPDATA%\manim-rs`, `~/Library/Caches/manim-rs`
    or `~/.cache/manim-rs`). Its `[[bin]] path` points at **your** file, so compiler errors
-   reference it directly. It depends on the engine source the runner was installed from.
+   reference it directly. It depends on the engine source the runner was built from (`MANIM_RS_SOURCE` overrides it);
+   when that directory no longer exists, as after `cargo install --git`, it depends on the
+   GitHub repository (the crate is not published to crates.io).
 2. Builds it in release mode with a cache-wide `CARGO_TARGET_DIR`. Every script shares
    the compiled engine, and incremental compilation keeps rebuilds to about a second.
 3. Runs the executable from the script's folder with `-o <script folder>` (unless you
@@ -118,7 +121,8 @@ Rust can't interpret a script, so `manim-rs scene.rs` does this:
 | `src/mobject/geometry.rs`, `graphing.rs`, `src/text.rs` | Shape library, axes and plots, text |
 | `src/animation/{mod,creation,morph,movement}.rs` | Animation trait, groups, every animation |
 | `src/world.rs`, `scene.rs`, `camera.rs` | Arena, timeline, display lists |
-| `src/pipeline.rs`, `renderer/`, `output.rs`, `config.rs` | Threads, backends, writers, CLI |
+| `src/pipeline.rs` (hidden from rustdoc), `renderer/`, `output.rs`, `config.rs` | Threads, backends, writers, CLI |
+| `src/guard.rs` | Panic containment for host calls |
 | `src/bin/manim-rs.rs` | The script runner |
 
 ## Additions for host applications
@@ -127,7 +131,8 @@ Rust can't interpret a script, so `manim-rs scene.rs` does this:
   copy-on-write, so cloning a world copies pointers. With `Config::record`, each `play`/
   `wait` stores a snapshot plus a fresh clone of its animation (animations are `Clone`;
   `.animate` closures run once and their result is shared). `Scene::seek(t)` restores the
-  snapshot before `t` and replays at most one play's frames without rasterizing.
+  snapshot before `t` and replays at most one play's frames without rasterizing. The result matches exported frame
+  `floor(t * fps)` (`Scene::frame_at`, `ScriptHost::frame_at`).
 - **Frame stepping.** `play`/`wait` are built on `begin_play`/`begin_wait`, `step` and
   `end_frame`, so a host (the script engine) can run its own per-frame code between them
   without re-entering the scene.

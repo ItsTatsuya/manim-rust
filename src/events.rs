@@ -25,6 +25,7 @@ use serde_json::{json, Value};
 
 /// How progress is reported on stderr.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ProgressMode {
     /// Readable one-line messages (the default).
     #[default]

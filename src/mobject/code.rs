@@ -49,6 +49,7 @@ const MONOSPACE: &[&str] = &[
 
 /// The background behind a listing.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CodeBackground {
     /// A rounded rectangle.
     #[default]

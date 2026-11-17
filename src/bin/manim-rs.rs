@@ -39,8 +39,7 @@ ENVIRONMENT:
   MANIM_RS_CACHE    Build cache location (default: your OS cache directory)
   MANIM_RS_SOURCE   Path to a manim-rust checkout to build scenes against. Default: the
                     source this runner was built from; if that directory no longer exists
-                    (e.g. a `cargo install` from crates.io), the published `manim` crate of
-                    the same version is downloaded from crates.io instead.
+                    (e.g. after `cargo install --git`), the GitHub repository is used instead.
 ";
 
 /// The engine source this runner was built from (may be gone by run time).
@@ -323,8 +322,8 @@ export default class {SCENE} extends Scene {
 enum Engine {
     /// A source checkout (this runner's own, or `MANIM_RS_SOURCE`).
     Path(PathBuf),
-    /// The published crate, pinned to this runner's version.
-    Registry(&'static str),
+    /// The GitHub repository (the crate is not published to crates.io).
+    Git(&'static str),
 }
 
 impl Engine {
@@ -332,7 +331,7 @@ impl Engine {
     fn dependency(&self) -> String {
         match self {
             Engine::Path(dir) => format!(r#"path = "{}""#, toml_path(dir)),
-            Engine::Registry(version) => format!(r#"version = "={version}""#),
+            Engine::Git(url) => format!(r#"git = "{url}""#),
         }
     }
 }
@@ -352,8 +351,8 @@ fn engine_source() -> Result<Engine, String> {
     if built.join("Cargo.toml").is_file() {
         return canonical(built).map(Engine::Path).map_err(|e| e.to_string());
     }
-    // Installed from crates.io (or the build tree was deleted): depend on the release.
-    Ok(Engine::Registry(env!("CARGO_PKG_VERSION")))
+    // Installed with `cargo install --git` (or the build tree was deleted): use the repository.
+    Ok(Engine::Git(env!("CARGO_PKG_REPOSITORY")))
 }
 
 fn cache_dir() -> PathBuf {
