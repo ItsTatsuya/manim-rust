@@ -319,7 +319,7 @@ fn region(l: f32, t: f32, r: f32, b: f32, w: u32, h: u32) -> Option<(usize, usiz
 fn boxes_for_gauss(sigma: f32) -> [usize; 3] {
     let ideal = ((12.0 * sigma * sigma / 3.0) + 1.0).sqrt();
     let mut wl = ideal.floor() as usize;
-    if wl % 2 == 0 {
+    if wl.is_multiple_of(2) {
         wl = wl.saturating_sub(1);
     }
     let wl = wl.max(1);

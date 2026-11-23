@@ -138,7 +138,7 @@ impl Effects {
                     dy: l(a.dy, b.dy),
                 }),
                 // A shadow that appears or disappears fades in or out.
-                (Some(a), None) => Some(Shadow { color: scale_alpha(a.color, 1.0 - t), ..a }).filter(|_| !pick),
+                (Some(a), None) => (!pick).then_some(Shadow { color: scale_alpha(a.color, 1.0 - t), ..a }),
                 (None, Some(b)) => Some(Shadow { color: scale_alpha(b.color, t), ..b }),
                 (None, None) => None,
             },

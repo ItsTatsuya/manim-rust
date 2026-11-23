@@ -59,6 +59,43 @@ export default class Lesson extends Scene {
 - Scripts may import `"manim"` and relative files (`import { title } from "./style"`).
   They have no file system, network or process access.
 
+### Camera, cards and dashes
+
+```ts
+const card = Rectangle(4, 2, { fillColor: "#FFFFFF", fillOpacity: 1 })
+  .setGradient(-PI / 4, [[0, "#2EC4B6", 0.2], [1, "#2EC4B6", 0.05]]) // CSS 135deg
+  .setShadow("#000000", 0.35, 0.3, 0, -0.2)                          // colour, opacity, blur, dx, dy
+  .pin();                                                            // ignores the camera
+const guide = Line(a, b).setDash(0.2, 0.15).clipTo(-1, -1, 1, 1);    // dashes cut at draw time
+
+this.play(MoveCamera({ focus: { point: [10, 20], anchor: [3, 0] }, zoom: 1.22, runTime: 2.2 }));
+this.play(guide.animate.setDash(0.2, 0.15, 0.35));                   // dashes march
+this.play(MoveCamera({ focus: { point: [10, 20], anchor: [10, 20] }, zoom: 1 }));
+```
+
+- `MoveCamera` takes `zoom` (2 shows half the width) or `width`, and `center`; `{focus:
+  {point, anchor}}` keeps `point` under a screen position that glides to `anchor` (a position in
+  the base frame), so a panel inside a larger layout can be pushed in on one spot, and the same
+  call with the point's own position as the anchor and `zoom: 1` undoes it exactly;
+  `{reset: true}` returns to the base frame. It moves everything except pinned mobjects, the
+  overlay (`addOverlay`) and the background. The live frame is part of the timeline, so seeking
+  restores it.
+- `pin()` and `clipTo(left, bottom, right, top)` mark the mobject and the children it has *now*.
+  The clip rectangle is in the base frame, in whole pixels, so zoomed content stays inside its
+  panel.
+- `setDash(length, gap, phase)` dashes the stroke in scene units. Dashes are cut from the path
+  when a frame is drawn, so `Create` and partial paths draw a dashed line on, it works on curves,
+  and `phase` can be animated. `clearDash()` removes it.
+- `setGradient(angle, stops)` fills over the bounding box (angle in radians, 0 = left to right,
+  counter-clockwise). Stops are `[position, color, opacity?]`; the fill opacity still multiplies
+  them (set `fillOpacity: 1`), so fades work.
+- `setShadow(color, opacity, blur, dx, dy)` draws a soft shadow outside the outline (never
+  through a see-through card). `setBackdropBlur(sigma)` blurs everything drawn below the
+  mobject, inside its outline; the mobject needs a shape but not a fill.
+- Frames that use gradients, shadows, blur or clips are drawn by the tiny-skia rasterizer on every
+  renderer (the GPU renderer and vello hand them over, as they do for images), so all renderers
+  give identical pixels for them.
+
 ### Tables, matrices and code
 
 ```ts

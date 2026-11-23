@@ -322,3 +322,105 @@ fn every_cpu_rasterizer_draws_effect_frames_identically() {
         assert!(g.render_batch(&[&dl]).unwrap().remove(0) == reference, "GPU");
     }
 }
+
+// ------------------------------------------------------------------ scripts
+
+#[cfg(feature = "script")]
+mod script {
+    use manim::config::{Config, Quality};
+    use manim::script::{HostOptions, ScriptHost};
+
+    fn run(name: &str, src: &str) -> ScriptHost {
+        let d = std::env::temp_dir().join(format!("manim-effects-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let p = d.join("s.ts");
+        std::fs::write(&p, src).unwrap();
+        let host = ScriptHost::load(&p, HostOptions::default()).unwrap();
+        let mut c = Config::default().quality(Quality::Low);
+        c.dry_run = true;
+        c.progress = manim::events::ProgressMode::None;
+        c.record = true;
+        host.run("S", &c).unwrap_or_else(|e| panic!("{e:#}"));
+        host
+    }
+
+    #[test]
+    fn scripts_can_move_the_camera_and_style_cards() {
+        let host = run(
+            "card",
+            r##"
+import { Scene, Rectangle, Line, Dot, FadeIn, Create, MoveCamera, LEFT, RIGHT, UP, vec } from "manim";
+export default class S extends Scene {
+  construct() {
+    const card = Rectangle(4, 2, { fillColor: "#FFFFFF", fillOpacity: 1 })
+      .setGradient(-Math.PI / 4, [[0, "#2EC4B6", 0.2], [1, "#2EC4B6", 0.05]])
+      .setShadow("#000000", 0.35, 0.3, 0, -0.2)
+      .pin();
+    const glass = Rectangle(3, 1, { fillOpacity: 0 }).setBackdropBlur(0.2);
+    const guide = Line([-2, 0, 0], [2, 0, 0]).setDash(0.2, 0.15).clipTo(-1, -1, 1, 1);
+    this.add(card, glass, guide);
+    this.play(MoveCamera({ focus: { point: [1, 1, 0], anchor: [3, 0, 0] }, zoom: 1.22, runTime: 2.2 }));
+    this.play(guide.animate.setDash(0.2, 0.15, 0.35), { runTime: 0.5 });
+    this.play(MoveCamera({ reset: true }));
+    this.play(MoveCamera({ width: 7.1, center: [1, 0, 0] }));
+  }
+}
+"##,
+        );
+        let (f, base_width) = host.with_scene(|s| (s.world().frame(), s.frame_size().0)).unwrap();
+        assert!((f.zoom - base_width / 7.1).abs() < 1e-9, "zoom {}", f.zoom);
+        assert_eq!(f.center.map(|c| c.x), Some(1.0));
+        let items = host.with_scene(|s| s.display_list()).unwrap().items;
+        assert!(items.iter().any(|i| i.gradient.is_some() && i.shadow.is_some()), "the card");
+        assert!(items.iter().any(|i| i.backdrop_blur > 0.0), "the glass");
+        assert!(items.iter().any(|i| i.clip.is_some() && i.subpaths.len() > 1), "the clipped dashes");
+    }
+
+    #[test]
+    fn a_group_hands_out_the_same_member_every_time() {
+        run(
+            "same_child",
+            r##"
+import { Scene, VGroup, Circle, Square } from "manim";
+export default class S extends Scene {
+  construct() {
+    const g = VGroup(Circle(), Square());
+    if (g.get(0) !== g.get(0)) throw new Error("get(0) is a new object each time");
+    if (g.get(-1) !== g.get(1)) throw new Error("negative and positive index differ");
+    if (g.get(0) === g.get(1)) throw new Error("two members are one object");
+    let threw = false;
+    try { g.get(5); } catch { threw = true; }
+    if (!threw) throw new Error("out of range did not throw");
+    g.get(0).shift([1, 0, 0]);
+    if (Math.abs(g.get(0).getCenter()[0] - 1) > 1e-9) throw new Error("the member does not write through");
+  }
+}
+"##,
+        );
+    }
+
+    #[test]
+    fn axes_coordinates_follow_a_scaled_axes() {
+        run(
+            "axes_scale",
+            r##"
+import { Scene, Axes } from "manim";
+export default class S extends Scene {
+  construct() {
+    const ax = Axes({ xRange: [0, 10, 1], yRange: [0, 20, 5], xLength: 6, yLength: 4 });
+    const near = (a: number[], b: number[]) => Math.hypot(a[0] - b[0], a[1] - b[1]) < 1e-6;
+    const c = ax.getCenter(), p = ax.c2p(4, 8);
+    ax.scale(0.5);
+    const want = [c[0] + (p[0] - c[0]) / 2, c[1] + (p[1] - c[1]) / 2];
+    if (!near(ax.c2p(4, 8), want)) throw new Error("c2p ignores scale: " + ax.c2p(4, 8) + " vs " + want);
+    const [x, y] = ax.p2c(ax.c2p(7, 15));
+    if (Math.abs(x - 7) > 1e-6 || Math.abs(y - 15) > 1e-6) throw new Error("p2c is not the inverse: " + [x, y]);
+    ax.shift([1, 2, 0]);
+    if (!near(ax.c2p(4, 8), [want[0] + 1, want[1] + 2])) throw new Error("c2p ignores a shift after scaling");
+  }
+}
+"##,
+        );
+    }
+}

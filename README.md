@@ -230,13 +230,16 @@ Set `MANIM_TRACE=1` to print where each pipeline stage spent its time.
   patterns), background and overlay layers, timeline markers and sections, sound files and
   raw samples muxed into the MP4, timeline recording with seeking to any time, layout
   inspection and checks, JSON progress events, PNG snapshots, cancellation.
+- **Camera and cards:** `MoveCamera` animates the frame's zoom and centre (pinned mobjects, the
+  overlay and the background stay put); dash patterns with an animatable phase, linear gradient
+  fills, soft drop shadows, background blur and clip rectangles.
 - **Everything else:** Manim's color palette and rate functions, layout helpers (`next_to`
   with `aligned_edge`, `to_edge`, `arrange`, `align_to`, `fit_within`, …), updaters, value
   trackers, `always_redraw`, z-index.
 
 ## What's missing
 
-3D scenes, camera animation (`MovingCameraScene`), LaTeX syntax for equations (Typst
+3D scenes, LaTeX syntax for equations (Typst
 syntax is used instead), and Python bindings. Contributions are welcome.
 
 ## Quality

@@ -386,7 +386,7 @@ mod tests {
         assert_eq!(s.len(), 7);
         for (i, (a, b)) in s.iter().enumerate() {
             assert!((a - 15.0 * i as f32).abs() < 0.2, "dash {i} starts at {a}");
-            assert!((b - a - if i == 6 { 10.0 } else { 10.0 }).abs() < 0.2, "dash {i} is {} long", b - a);
+            assert!((b - a - 10.0).abs() < 0.2, "dash {i} is {} long", b - a);
         }
     }
 

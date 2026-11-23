@@ -52,6 +52,12 @@ trait Animation {
 - The `Camera` turns the world into a `DisplayList`: pixel-space cubic paths with resolved
   fill/stroke RGBA and stroke width in pixels (1 stroke unit = 0.01 scene units, as in
   Cairo Manim). Non-finite geometry is dropped here.
+- The live camera frame (zoom, centre) is part of the `World`, so animations can move it and
+  keyframes restore it; `Camera` keeps the base frame. Pinned mobjects, the overlay and the
+  background are drawn through the base frame.
+- Dash patterns are cut from the pixel-space path at draw time; gradients are resolved over the
+  mobject's bounding box. Frames with gradients, shadows, backdrop blur or clips
+  (`DisplayList::needs_reference`) go to tiny-skia on every renderer, so they match everywhere.
 - `DisplayList` derives `PartialEq`, which is how identical frames are detected cheaply
   before any pixels are touched.
 - **CPU:** each frame of a batch goes to a rayon worker. Two rasterizers are compiled in:
