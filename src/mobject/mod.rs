@@ -178,6 +178,8 @@ pub struct VMobject {
     pub children: Vec<VMobject>,
     /// Non-geometric data: kind tag, label, text and image metadata.
     pub meta: Meta,
+    /// Dash, gradient, shadow, blur, pinning and clip style (see [`crate::effects`]).
+    pub effects: crate::effects::Effects,
 }
 
 impl Default for VMobject {
@@ -192,6 +194,7 @@ impl Default for VMobject {
             z_index: 0,
             children: Vec::new(),
             meta: Meta::default(),
+            effects: Default::default(),
         }
     }
 }
@@ -724,7 +727,7 @@ impl VMobject {
 
     // ------------------------------------------------------------------ style
 
-    fn map_style(mut self, mut f: impl FnMut(&mut VMobject)) -> Self {
+    pub(crate) fn map_style(mut self, mut f: impl FnMut(&mut VMobject)) -> Self {
         self.for_each_mut(&mut |m| f(m));
         self
     }
@@ -1012,6 +1015,7 @@ pub fn lerp_leaf(a: &VMobject, b: &VMobject, t: f64, path: PathFunc) -> VMobject
         stroke_width: l(a.stroke_width, b.stroke_width),
         z_index: if t >= 1.0 { b.z_index } else { a.z_index },
         children: Vec::new(),
+        effects: a.effects.lerp(&b.effects, t),
         meta: {
             let mut meta = if t >= 1.0 { b.meta.clone() } else { a.meta.clone() };
             if let (Some(x), Some(y)) = (a.meta.anchors, b.meta.anchors) {

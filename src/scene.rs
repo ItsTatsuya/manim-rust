@@ -770,6 +770,7 @@ impl Scene {
     /// `while let Some(dt) = s.step(&mut p) { /* own per-frame code */ s.end_frame(&p, dt) }`.
     pub fn begin_play(&mut self, anims: impl IntoAnimations) -> Playback {
         self.leave_seek();
+        self.world.set_base_center(self.camera.frame_center);
         let mut group = AnimationGroup::new(anims);
         let world = &self.world;
         let g = &mut group;
@@ -940,7 +941,8 @@ impl Scene {
         }
         if let Some(c) = &mut self.checker {
             let cam = &self.camera;
-            c.set_frame(cam.frame_width(), cam.frame_height, [cam.frame_center.x, cam.frame_center.y]);
+            let (center, height) = cam.live_frame(&self.world);
+            c.set_frame(height * cam.frame_width() / cam.frame_height, height, [center.x, center.y]);
             let new = c.settled(&self.world, self.time, Some(p.play_index));
             self.report_problems(new);
         }

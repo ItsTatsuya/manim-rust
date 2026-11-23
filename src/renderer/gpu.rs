@@ -409,7 +409,7 @@ impl Renderer for GpuRenderer {
     fn render_batch(&mut self, frames: &[&DisplayList]) -> Result<Vec<Vec<u8>>> {
         // Raster images are drawn by the CPU rasterizer (a GPU texture path would cost
         // more in uploads than these frames take to rasterize on all cores).
-        if frames.iter().any(|f| f.has_images()) {
+        if frames.iter().any(|f| f.needs_reference()) {
             let pool = &self.pool;
             return Ok(frames.par_iter().map(|f| super::cpu::rasterize_pooled(f, pool)).collect());
         }

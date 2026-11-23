@@ -11,10 +11,11 @@ use std::sync::{Arc, Mutex};
 use anyhow::Result;
 use rayon::prelude::*;
 use tiny_skia::{
-    FillRule, FilterQuality, LineCap, LineJoin, Paint, PathBuilder, Pixmap, PixmapPaint, PixmapRef, Stroke, Transform,
+    FillRule, FilterQuality, LineCap, LineJoin, Mask, Paint, PathBuilder, Pixmap, PixmapPaint, PixmapRef, Stroke,
+    Transform,
 };
 
-use super::{DisplayList, DrawPath, Frame, FrameFinisher, FramePool, Layer, Renderer};
+use super::{DisplayList, DrawPath, Frame, FrameFinisher, FramePool, Layer, PxGradient, PxShadow, Renderer};
 
 /// Which rasterizer a [`CpuRenderer`] uses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -116,7 +117,7 @@ impl Calibration {
         frames
             .iter()
             .map(|dl| {
-                if dl.has_images() {
+                if dl.needs_reference() {
                     return Plan::Use(0);
                 }
                 let b = Self::bucket(dl);
@@ -222,7 +223,22 @@ pub(super) fn base_pixmap(dl: &DisplayList, pool: &FramePool) -> Pixmap {
 
 fn draw_items<'a>(pm: &mut Pixmap, items: impl IntoIterator<Item = &'a DrawPath>) {
     let mut paint = Paint { anti_alias: true, ..Default::default() };
+    // The clip mask of the last item that had one, reused while the rectangle stays the same.
+    let mut clip_cache: Option<([f32; 4], Option<Mask>)> = None;
     for item in items {
+        let clip: Option<&Mask> = match item.clip {
+            None => None,
+            Some(rect) => {
+                if clip_cache.as_ref().is_none_or(|(r, _)| *r != rect) {
+                    clip_cache = Some((rect, clip_mask(pm.width(), pm.height(), rect)));
+                }
+                // A rectangle with no area clips everything away.
+                match &clip_cache {
+                    Some((_, Some(m))) => Some(m),
+                    _ => continue,
+                }
+            }
+        };
         if let Some(img) = &item.image {
             let data = &img.image.0;
             let Some(src) = PixmapRef::from_bytes(&data.premultiplied, data.width, data.height) else { continue };
@@ -232,7 +248,7 @@ fn draw_items<'a>(pm: &mut Pixmap, items: impl IntoIterator<Item = &'a DrawPath>
                 quality: FilterQuality::Bicubic,
                 ..Default::default()
             };
-            pm.draw_pixmap(0, 0, src, &pp, Transform::from_row(sx, ky, kx, sy, tx, ty), None);
+            pm.draw_pixmap(0, 0, src, &pp, Transform::from_row(sx, ky, kx, sy, tx, ty), clip);
             continue;
         }
         let mut pb = PathBuilder::new();
@@ -246,15 +262,200 @@ fn draw_items<'a>(pm: &mut Pixmap, items: impl IntoIterator<Item = &'a DrawPath>
             }
         }
         let Some(path) = pb.finish() else { continue };
+        let rule = if item.nonzero { FillRule::Winding } else { FillRule::EvenOdd };
+        if item.backdrop_blur > 0.0 {
+            blur_behind(pm, &path, rule, item.backdrop_blur, clip);
+        }
+        if let (Some(shadow), Some(_)) = (&item.shadow, item.fill) {
+            draw_shadow(pm, &path, rule, shadow, clip);
+        }
         if let Some(fill) = item.fill {
             paint.set_color(color(fill));
-            let rule = if item.nonzero { FillRule::Winding } else { FillRule::EvenOdd };
-            pm.fill_path(&path, &paint, rule, Transform::identity(), None);
+            if let Some(shader) = item.gradient.as_ref().and_then(gradient_shader) {
+                paint.shader = shader;
+            }
+            pm.fill_path(&path, &paint, rule, Transform::identity(), clip);
         }
         if let Some((c, width)) = item.stroke {
-            paint.set_color(color(c));
+            paint.set_color(color(c)); // also resets any gradient shader
             let stroke = Stroke { width, line_cap: LineCap::Round, line_join: LineJoin::Round, ..Default::default() };
-            pm.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+            pm.stroke_path(&path, &paint, &stroke, Transform::identity(), clip);
+        }
+    }
+}
+
+fn gradient_shader(g: &PxGradient) -> Option<tiny_skia::Shader<'static>> {
+    let stops = g.stops.iter().map(|(at, c)| tiny_skia::GradientStop::new(*at, color(*c))).collect();
+    tiny_skia::LinearGradient::new(
+        tiny_skia::Point::from_xy(g.start[0], g.start[1]),
+        tiny_skia::Point::from_xy(g.end[0], g.end[1]),
+        stops,
+        tiny_skia::SpreadMode::Pad,
+        Transform::identity(),
+    )
+}
+
+/// A coverage mask of the pixel rectangle `[left, top, right, bottom]`, or `None` if it is empty.
+fn clip_mask(w: u32, h: u32, r: [f32; 4]) -> Option<Mask> {
+    let rect = tiny_skia::Rect::from_ltrb(r[0].min(r[2]), r[1].min(r[3]), r[0].max(r[2]), r[1].max(r[3]))?;
+    let mut mask = Mask::new(w, h)?;
+    mask.fill_path(&PathBuilder::from_rect(rect), FillRule::Winding, false, Transform::identity());
+    Some(mask)
+}
+
+/// An integer pixel rectangle `(x, y, w, h)` inside a `w × h` canvas, or `None` if nothing is left.
+fn region(l: f32, t: f32, r: f32, b: f32, w: u32, h: u32) -> Option<(usize, usize, usize, usize)> {
+    if ![l, t, r, b].iter().all(|v| v.is_finite()) {
+        return None;
+    }
+    let x0 = (l.floor().max(0.0) as i64).min(w as i64);
+    let y0 = (t.floor().max(0.0) as i64).min(h as i64);
+    let x1 = (r.ceil().max(0.0) as i64).min(w as i64);
+    let y1 = (b.ceil().max(0.0) as i64).min(h as i64);
+    (x1 > x0 && y1 > y0).then_some((x0 as usize, y0 as usize, (x1 - x0) as usize, (y1 - y0) as usize))
+}
+
+/// Box widths whose three passes approximate a Gaussian of standard deviation `sigma`.
+fn boxes_for_gauss(sigma: f32) -> [usize; 3] {
+    let ideal = ((12.0 * sigma * sigma / 3.0) + 1.0).sqrt();
+    let mut wl = ideal.floor() as usize;
+    if wl % 2 == 0 {
+        wl = wl.saturating_sub(1);
+    }
+    let wl = wl.max(1);
+    let wu = wl + 2;
+    let m = ((12.0 * sigma * sigma - 3.0 * (wl * wl) as f32 - 12.0 * wl as f32 - 9.0) / (-4.0 * wl as f32 - 4.0))
+        .round()
+        .clamp(0.0, 3.0) as usize;
+    std::array::from_fn(|i| if i < m { wl } else { wu })
+}
+
+/// Gaussian-blur an interleaved `w × h` buffer of `ch` channels in place (three box passes per
+/// axis). Outside the buffer is either its edge colour (`clamp`) or zero.
+fn gaussian_blur(buf: &mut [f32], w: usize, h: usize, ch: usize, sigma: f32, clamp: bool) {
+    if sigma < 0.3 || w == 0 || h == 0 {
+        return;
+    }
+    let mut tmp = vec![0.0f32; buf.len()];
+    for width in boxes_for_gauss(sigma) {
+        let r = (width - 1) / 2;
+        box_pass(buf, &mut tmp, (w, h, ch), r, true, clamp);
+        box_pass(&tmp, buf, (w, h, ch), r, false, clamp);
+    }
+}
+
+fn box_pass(src: &[f32], dst: &mut [f32], (w, h, ch): (usize, usize, usize), r: usize, horizontal: bool, clamp: bool) {
+    let (len, lines, step, line_step) = if horizontal { (w, h, ch, w * ch) } else { (h, w, w * ch, ch) };
+    let norm = 1.0 / (2 * r + 1) as f32;
+    for line in 0..lines {
+        let base = line * line_step;
+        for c in 0..ch {
+            let at = |i: isize| -> f32 {
+                if i < 0 || i >= len as isize {
+                    if clamp {
+                        let j = i.clamp(0, len as isize - 1) as usize;
+                        src[base + j * step + c]
+                    } else {
+                        0.0
+                    }
+                } else {
+                    src[base + i as usize * step + c]
+                }
+            };
+            let mut sum = 0.0;
+            for i in -(r as isize)..=(r as isize) {
+                sum += at(i);
+            }
+            for i in 0..len {
+                dst[base + i * step + c] = sum * norm;
+                sum += at(i as isize + r as isize + 1) - at(i as isize - r as isize);
+            }
+        }
+    }
+}
+
+/// Blur what is already drawn inside `path` (frosted glass).
+fn blur_behind(pm: &mut Pixmap, path: &tiny_skia::Path, rule: FillRule, sigma: f32, clip: Option<&Mask>) {
+    let (cw, ch) = (pm.width(), pm.height());
+    let b = path.bounds();
+    let Some((bx, by, bw, bh)) = region(b.left(), b.top(), b.right(), b.bottom(), cw, ch) else { return };
+    let margin = (sigma * 3.0).ceil();
+    let Some((rx, ry, rw, rh)) =
+        region(bx as f32 - margin, by as f32 - margin, (bx + bw) as f32 + margin, (by + bh) as f32 + margin, cw, ch)
+    else {
+        return;
+    };
+    let stride = cw as usize * 4;
+    let mut plane = vec![0.0f32; rw * rh * 4];
+    for y in 0..rh {
+        let row = &pm.data()[(ry + y) * stride + rx * 4..][..rw * 4];
+        for (d, s) in plane[y * rw * 4..][..rw * 4].iter_mut().zip(row) {
+            *d = *s as f32;
+        }
+    }
+    gaussian_blur(&mut plane, rw, rh, 4, sigma, true);
+    let Some(mut shape) = Mask::new(bw as u32, bh as u32) else { return };
+    shape.fill_path(path, rule, true, Transform::from_translate(-(bx as f32), -(by as f32)));
+    let data = pm.data_mut();
+    for y in 0..bh {
+        for x in 0..bw {
+            let mut cov = shape.data()[y * bw + x] as f32 / 255.0;
+            if let Some(c) = clip {
+                cov *= c.data()[(by + y) * cw as usize + bx + x] as f32 / 255.0;
+            }
+            if cov <= 0.0 {
+                continue;
+            }
+            let p = (y + by - ry) * rw * 4 + (x + bx - rx) * 4;
+            let o = (by + y) * stride + (bx + x) * 4;
+            for c in 0..4 {
+                let old = data[o + c] as f32;
+                data[o + c] = (old + (plane[p + c] - old) * cov).round().clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
+}
+
+/// Draw a soft shadow of `path` under it, outside its outline.
+fn draw_shadow(pm: &mut Pixmap, path: &tiny_skia::Path, rule: FillRule, s: &PxShadow, clip: Option<&Mask>) {
+    let (cw, ch) = (pm.width(), pm.height());
+    let b = path.bounds();
+    let margin = (s.sigma * 3.0).ceil();
+    let Some((rx, ry, rw, rh)) = region(
+        b.left() + s.offset[0] - margin,
+        b.top() + s.offset[1] - margin,
+        b.right() + s.offset[0] + margin,
+        b.bottom() + s.offset[1] + margin,
+        cw,
+        ch,
+    ) else {
+        return;
+    };
+    let Some(mut cast) = Mask::new(rw as u32, rh as u32) else { return };
+    cast.fill_path(path, rule, true, Transform::from_translate(s.offset[0] - rx as f32, s.offset[1] - ry as f32));
+    let mut plane: Vec<f32> = cast.data().iter().map(|v| *v as f32 / 255.0).collect();
+    gaussian_blur(&mut plane, rw, rh, 1, s.sigma, false);
+    // The shadow is only drawn outside the outline, so a see-through card does not show it.
+    let Some(mut hole) = Mask::new(rw as u32, rh as u32) else { return };
+    hole.fill_path(path, rule, true, Transform::from_translate(-(rx as f32), -(ry as f32)));
+    let stride = cw as usize * 4;
+    let [r, g, bl, a] = s.color;
+    let rgb = [r * 255.0, g * 255.0, bl * 255.0];
+    let data = pm.data_mut();
+    for y in 0..rh {
+        for x in 0..rw {
+            let mut k = a * plane[y * rw + x] * (1.0 - hole.data()[y * rw + x] as f32 / 255.0);
+            if let Some(c) = clip {
+                k *= c.data()[(ry + y) * cw as usize + rx + x] as f32 / 255.0;
+            }
+            if k <= 0.0 {
+                continue;
+            }
+            let o = (ry + y) * stride + (rx + x) * 4;
+            for (c, v) in rgb.into_iter().enumerate() {
+                let old = data[o + c] as f32;
+                data[o + c] = (old + (v - old) * k).round().clamp(0.0, 255.0) as u8;
+            }
         }
     }
 }

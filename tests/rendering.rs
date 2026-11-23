@@ -256,6 +256,7 @@ fn pooled_buffers_are_fully_overwritten() {
         stroke: None,
         image: None,
         nonzero: true,
+        ..Default::default()
     };
     with_layer.background_layer = Some(Layer(std::sync::Arc::new(vec![layer])));
     for dl in [frame(vec![Circle::new(2.0).set_fill(RED, 0.5)]), with_layer] {
@@ -293,6 +294,7 @@ fn gpu_background_layer_is_cached_and_matches_cpu() {
                 stroke: None,
                 image: None,
                 nonzero: true,
+                ..Default::default()
             }]);
             let mut world = World::new();
             let id = world.insert(Circle::new(2.0).set_fill(RED, 0.7));

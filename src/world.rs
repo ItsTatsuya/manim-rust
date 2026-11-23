@@ -17,6 +17,31 @@ pub struct MobjectId(pub(crate) usize);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct TrackerId(pub(crate) usize);
 
+/// The live camera frame, relative to the scene's base frame (the frame the [`Camera`](crate::camera::Camera)
+/// was configured with). Lives in the world so animations can move it and seeking restores it with everything else.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FrameState {
+    /// Zoom factor: `2.0` shows half the base frame's width and height. `1.0` is the base frame.
+    pub zoom: f64,
+    /// Scene point shown at the centre of the frame; `None` keeps the base frame's centre.
+    pub center: Option<crate::constants::Point>,
+    /// Centre of the base frame, kept in sync by the scene so animations can start from it.
+    pub base_center: crate::constants::Point,
+}
+
+impl Default for FrameState {
+    fn default() -> Self {
+        FrameState { zoom: 1.0, center: None, base_center: crate::constants::ORIGIN }
+    }
+}
+
+impl FrameState {
+    /// The centre actually shown.
+    pub fn center_now(&self) -> crate::constants::Point {
+        self.center.unwrap_or(self.base_center)
+    }
+}
+
 /// Cloning a world is cheap: mobjects are shared copy-on-write, so a snapshot only
 /// copies the ones that change afterwards (timeline keyframes rely on this).
 #[derive(Default, Clone)]
@@ -29,9 +54,28 @@ pub struct World {
     /// Drawn above everything and kept by `clear` (watermarks, captions).
     overlay: Vec<MobjectId>,
     trackers: Vec<f64>,
+    frame: FrameState,
 }
 
 impl World {
+    /// The live camera frame (zoom and centre relative to the base frame).
+    pub fn frame(&self) -> FrameState {
+        self.frame
+    }
+
+    /// Set the live camera frame. Non-finite or non-positive zoom is ignored.
+    pub fn set_frame(&mut self, zoom: f64, center: Option<crate::constants::Point>) {
+        if zoom.is_finite() && zoom > 0.0 {
+            self.frame.zoom = zoom.clamp(1e-3, 1e3);
+        }
+        self.frame.center = center.filter(|c| c.is_finite());
+    }
+
+    /// Tell the world where the base frame is centred (the scene does this before every play).
+    pub fn set_base_center(&mut self, c: crate::constants::Point) {
+        self.frame.base_center = c;
+    }
+
     /// An empty world.
     pub fn new() -> Self {
         Self::default()

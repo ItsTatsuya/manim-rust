@@ -143,3 +143,94 @@ impl Animation for UpdateFromAlpha {
         (self.f.borrow_mut())(w, alpha);
     }
 }
+
+/// Move and zoom the camera frame (Manim's `MovingCameraScene` frame animation).
+///
+/// Two ways to aim it:
+/// - [`MoveCamera::to`]: end with `zoom` (2.0 shows half the base frame's width) centred on a scene point.
+/// - [`MoveCamera::zoom_on`]: zoom in on a scene point while it glides to another place on screen.
+///   The point stays under the same screen position for the whole move, so a push-in on a graph's
+///   crossing lands it in the middle of the graph's panel (and zooming back with the
+///   original position as the anchor undoes it exactly).
+///
+/// Mobjects marked [`VMobject::pin`](crate::mobject::VMobject::pin), the overlay and the background do not follow the camera.
+#[derive(Clone)]
+pub struct MoveCamera {
+    cfg: AnimConfig,
+    zoom: Option<f64>,
+    center: Option<Point>,
+    focus: Option<(Point, Point)>,
+    start_zoom: f64,
+    start_center: Point,
+    start_screen: Point,
+}
+
+impl MoveCamera {
+    fn blank() -> Self {
+        MoveCamera {
+            cfg: AnimConfig::default(),
+            zoom: None,
+            center: None,
+            focus: None,
+            start_zoom: 1.0,
+            start_center: ORIGIN,
+            start_screen: ORIGIN,
+        }
+    }
+
+    /// End zoomed by `zoom` (`None` keeps the current zoom) and centred on `center` (`None` is the base frame's centre).
+    pub fn to(zoom: Option<f64>, center: Option<Point>) -> Self {
+        MoveCamera { zoom, center, ..Self::blank() }
+    }
+
+    /// Back to the base frame: no zoom, the base centre.
+    pub fn reset() -> Self {
+        MoveCamera { zoom: Some(1.0), ..Self::blank() }
+    }
+
+    /// End at `zoom` with scene point `point` shown at `anchor`, a position given in base-frame
+    /// scene coordinates (the point's place on screen before any camera move).
+    pub fn zoom_on(point: Point, zoom: f64, anchor: Point) -> Self {
+        MoveCamera { zoom: Some(zoom), focus: Some((point, anchor)), ..Self::blank() }
+    }
+
+    fn screen_of(p: Point, zoom: f64, center: Point, origin: Point) -> Point {
+        (p - center) * zoom + origin
+    }
+}
+
+impl Animation for MoveCamera {
+    impl_config!();
+    fn name(&self) -> String {
+        "MoveCamera".into()
+    }
+    fn begin(&mut self, w: &mut World) {
+        let f = w.frame();
+        self.start_zoom = f.zoom;
+        self.start_center = f.center_now();
+        if let Some((p, _)) = self.focus {
+            self.start_screen = Self::screen_of(p, f.zoom, f.center_now(), f.base_center);
+        }
+    }
+    fn apply(&mut self, w: &mut World, alpha: f64) {
+        let base = w.frame().base_center;
+        let z1 = self.zoom.unwrap_or(self.start_zoom);
+        let zoom = self.start_zoom + (z1 - self.start_zoom) * alpha;
+        if let Some((p, anchor)) = self.focus {
+            let screen = self.start_screen + (anchor - self.start_screen) * alpha;
+            // screen = (p - centre) * zoom + base  =>  centre = p - (screen - base) / zoom
+            w.set_frame(zoom, Some(p - (screen - base) / zoom));
+        } else {
+            let c1 = self.center.unwrap_or(base);
+            let center = self.start_center + (c1 - self.start_center) * alpha;
+            w.set_frame(zoom, Some(center));
+        }
+    }
+    fn clean_up(&mut self, w: &mut World) {
+        // Back at the base frame exactly: no float drift, and later changes to the base centre apply.
+        let f = w.frame();
+        if (f.zoom - 1.0).abs() < 1e-12 && f.center.is_some_and(|c| c.distance(f.base_center) < 1e-9) {
+            w.set_frame(1.0, None);
+        }
+    }
+}

@@ -79,6 +79,7 @@ pub mod color;
 pub mod config;
 pub mod constants;
 pub mod defaults;
+pub mod effects;
 pub mod events;
 mod guard;
 pub mod image;

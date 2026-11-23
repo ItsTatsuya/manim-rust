@@ -211,6 +211,21 @@ export class Mobject {
   fade(darkness = 0.5) { return this._op("fade", darkness); }
   setColorByGradient(...colors) { return this._op("setColorByGradient", colors.flat()); }
   setZIndex(z) { return this._op("setZIndex", z); }
+  /** Dash the stroke: `length` long dashes with `gap` between (scene units); animate `phase` to make them march. */
+  setDash(length = 0.1, gap = length, phase = 0) { return this._op("setDash", length, gap, phase); }
+  clearDash() { return this._op("clearDash"); }
+  /** Linear gradient fill over the bounding box. `angle` in radians (0 = left to right); stops are `[position, color, opacity?]`. */
+  setGradient(angle, stops) { return this._op("setGradient", angle, stops); }
+  /** Soft drop shadow outside the outline. */
+  setShadow(color = "#000000", opacity = 0.35, blur = 0.3, dx = 0, dy = -0.2) { return this._op("setShadow", color, opacity, blur, dx, dy); }
+  clearShadow() { return this._op("clearShadow"); }
+  /** Blur everything drawn below this mobject, inside its outline, by `sigma` scene units. */
+  setBackdropBlur(sigma) { return this._op("setBackdropBlur", sigma); }
+  /** Keep this mobject (and its children) in the base frame when the camera moves. */
+  pin(on = true) { return this._op("pin", on); }
+  /** Clip this mobject (and its children) to a rectangle of the base frame. */
+  clipTo(left, bottom, right, top) { return this._op("clipTo", left, bottom, right, top); }
+  clearClip() { return this._op("clearClip"); }
   /** Recolor every occurrence of `needle` in a text. */
   setColorText(needle, color) { return this._op("setColorText", needle, color); }
   setColorChars(start, end, color) { return this._op("setColorChars", start, end, color); }
@@ -639,6 +654,8 @@ export const TransformMatchingTex = function (a, b, o) { return anim("TransformM
 export const Rotate = function (target, angle = PI, o) { return anim("Rotate", { ...opts(o), target, angle }); };
 export const Rotating = Rotate;
 export const MoveAlongPath = function (target, path, o) { return anim("MoveAlongPath", { ...opts(o), target, path }); };
+/** Move and zoom the camera frame. `{zoom|width, center}`, `{focus: {point, anchor}, zoom}` to push in on a point while it glides to `anchor`, or `{reset: true}`. */
+export const MoveCamera = function (o) { return anim("MoveCamera", o); };
 export const Wait = function (runTime = 1) { return anim("Wait", { runTime }); };
 const G = (type) => function (...items) {
   const o = items.length && !(items[items.length - 1] instanceof Animation) && !(items[items.length - 1] instanceof AnimateBuilder) && !Array.isArray(items[items.length - 1]) ? opts(items.pop()) : {};

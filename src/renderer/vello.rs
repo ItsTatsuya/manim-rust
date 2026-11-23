@@ -55,7 +55,7 @@ fn draw_items(ctx: &mut RenderContext, items: &[DrawPath]) {
 
 /// Rasterize one display list into RGBA8 in a buffer from `pool`, or `None` if it contains images.
 pub fn rasterize_pooled(dl: &DisplayList, pool: &FramePool) -> Option<Vec<u8>> {
-    if dl.has_images() {
+    if dl.needs_reference() {
         return None;
     }
     let (w, h) = (dl.width.max(1), dl.height.max(1));
