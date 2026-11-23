@@ -424,3 +424,31 @@ export default class S extends Scene {
         );
     }
 }
+
+#[cfg(feature = "text")]
+#[test]
+fn the_layout_check_follows_the_camera_pins_and_clips() {
+    if !common::fonts_available() {
+        return;
+    }
+    let mut c = test_config("check_camera");
+    c.check = true;
+    let mut s = Scene::new(&c, "CheckCam").unwrap();
+    // A heading and a label in the work column are pinned; a graph label near the right
+    // edge is clipped to its panel (right edge at x = 6.5); one in the middle is neither.
+    let pinned = s.insert(Text::new("pinned heading").shift(LEFT * 4.2).pin(true));
+    let clipped = s.insert(Text::new("in the panel").shift(RIGHT * 6.0).clip_to(pt(-0.45, -3.3), pt(6.5, 3.2)));
+    let loose = s.insert(Text::new("loose").shift(LEFT * 4.2 + DOWN * 2.0));
+    s.play((FadeIn::new(pinned), FadeIn::new(clipped), FadeIn::new(loose)));
+    assert!(s.problems().is_empty(), "{:?}", s.problems());
+    // Push in on the right-hand label: unpinned text near the left edge leaves the frame, but
+    // the pinned heading stays, and the clipped label is cut at its panel instead of overflowing.
+    s.play(MoveCamera::zoom_on(RIGHT * 6.0, 1.5, RIGHT * 3.0));
+    let found: Vec<String> = s.problems().iter().map(|p| p.message.clone()).collect();
+    assert!(!found.iter().any(|m| m.contains("pinned heading")), "{found:?}");
+    assert!(!found.iter().any(|m| m.contains("in the panel")), "{found:?}");
+    assert!(
+        found.iter().any(|m| m.contains("loose") && m.contains("off the frame")),
+        "unpinned text left the frame: {found:?}"
+    );
+}

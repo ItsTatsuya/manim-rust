@@ -941,8 +941,8 @@ impl Scene {
         }
         if let Some(c) = &mut self.checker {
             let cam = &self.camera;
-            let (center, height) = cam.live_frame(&self.world);
-            c.set_frame(height * cam.frame_width() / cam.frame_height, height, [center.x, center.y]);
+            // Text boxes are mapped through the camera frame, so the check always uses the base frame.
+            c.set_frame(cam.frame_width(), cam.frame_height, [cam.frame_center.x, cam.frame_center.y]);
             let new = c.settled(&self.world, self.time, Some(p.play_index));
             self.report_problems(new);
         }
