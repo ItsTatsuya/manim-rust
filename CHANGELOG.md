@@ -9,6 +9,17 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Camera frame animation: `MoveCamera` (and `World::frame`, `Camera::live_frame`) zooms and moves
+  the frame, including a "zoom on a point while it glides to an anchor" mode. The frame lives in the
+  world, so seeking restores it. `VMobject::pin` keeps a mobject in the base frame;
+  `VMobject::clip_to` clips it to a rectangle. Scripts: `MoveCamera({...})`, `pin()`, `clipTo()`.
+- `effects` module (`Effects`, `Dash`, `Gradient`, `Shadow`): dash patterns cut by arc length at
+  draw time with an animatable phase (`set_dash`), linear gradient fills (`set_gradient`), soft drop
+  shadows (`set_shadow`) and background blur (`set_backdrop_blur`). `DrawPath` gained `gradient`,
+  `shadow`, `backdrop_blur` and `clip` (and `Default`); `DisplayList::needs_reference` says when a
+  frame needs them. Such frames are drawn by tiny-skia on every renderer.
+- Script methods `setDash`, `setGradient`, `setShadow`, `setBackdropBlur`, `pin`, `clipTo` (and
+  their `clear` forms), all usable in `.animate`.
 - `Config::x264` ([`X264Options`](src/output.rs): preset and CRF), with `--x264-preset` and
   `--crf` on the command line and `output::create_writer_with` / `FfmpegWriter::with_options`.
   Defaults stay `fast` and CRF 18.
@@ -67,6 +78,9 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- Script `Axes.c2p` / `p2c` ignored scaling of the axes after creation; they now follow scale as well as
+  moves.
+- Script `group.get(i)` made a new handle on every call; it now returns the same object for the same member.
 - Hangs, panics and lost output on hostile or broken input: non-finite geometry, deeply nested
   groups, huge frames, runaway scripts and Typst compiles, and stale ids now end in an error,
   and a failed render removes its partial output.

@@ -5,6 +5,7 @@ pub use crate::camera::Camera;
 pub use crate::color::*;
 pub use crate::config::{Config, Quality};
 pub use crate::constants::*;
+pub use crate::effects::{Dash, Effects, Gradient, GradientStop, Shadow};
 pub use crate::image::ImageMobject;
 #[cfg(feature = "math")]
 pub use crate::math::{MathTex, Typst};

@@ -30,8 +30,30 @@ pub struct PxSubpath {
     pub closed: bool,
 }
 
-/// A styled path, or an image, in pixel space.
+/// A linear gradient in pixel space. Straight (non-premultiplied) RGBA stops, positions `0..=1`.
 #[derive(Clone, Debug, PartialEq)]
+pub struct PxGradient {
+    /// Where the gradient line starts, in pixels.
+    pub start: [f32; 2],
+    /// Where the gradient line ends, in pixels.
+    pub end: [f32; 2],
+    /// `(position, straight RGBA)` stops, ordered by position.
+    pub stops: Vec<(f32, [f32; 4])>,
+}
+
+/// A soft drop shadow in pixel space, drawn outside the path's outline.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PxShadow {
+    /// Straight RGBA; the alpha is the strength at the shadow's densest.
+    pub color: [f32; 4],
+    /// Offset in pixels (x right, y down).
+    pub offset: [f32; 2],
+    /// Blur standard deviation in pixels.
+    pub sigma: f32,
+}
+
+/// A styled path, or an image, in pixel space.
+#[derive(Clone, Debug, PartialEq, Default)]
 pub struct DrawPath {
     /// The outlines (one or more) the fill and stroke apply to.
     pub subpaths: Vec<PxSubpath>,
@@ -43,6 +65,25 @@ pub struct DrawPath {
     pub image: Option<DrawImage>,
     /// Non-zero winding fill (default even-odd).
     pub nonzero: bool,
+    /// Replaces the solid `fill` colour when set (`fill` still says the path is filled).
+    pub gradient: Option<PxGradient>,
+    /// Drop shadow outside the outline, drawn before the path.
+    pub shadow: Option<PxShadow>,
+    /// Blur (standard deviation in pixels) of everything already drawn, inside the outline; 0 = none.
+    pub backdrop_blur: f32,
+    /// Clip rectangle `[left, top, right, bottom]` in pixels.
+    pub clip: Option<[f32; 4]>,
+}
+
+impl DrawPath {
+    /// Whether this item needs the reference (tiny-skia) rasterizer: images and the effects above.
+    pub fn needs_reference(&self) -> bool {
+        self.image.is_some()
+            || self.gradient.is_some()
+            || self.shadow.is_some()
+            || self.backdrop_blur > 0.0
+            || self.clip.is_some()
+    }
 }
 
 /// A raster image placed by an affine map from image pixels to frame pixels.
@@ -88,6 +129,13 @@ impl DisplayList {
     pub fn has_images(&self) -> bool {
         let layer = self.background_layer.as_ref().map(|l| l.0.as_slice()).unwrap_or(&[]);
         layer.iter().chain(&self.items).any(|i| i.image.is_some())
+    }
+
+    /// Whether any item is an image or uses a gradient, shadow, backdrop blur or clip. Such frames
+    /// are drawn by tiny-skia only (the vello and GPU renderers hand them over), so all
+    /// renderers produce the same pixels for them.
+    pub fn needs_reference(&self) -> bool {
+        self.all_items().any(DrawPath::needs_reference)
     }
 
     /// Every item in draw order: background layer, then the scene.

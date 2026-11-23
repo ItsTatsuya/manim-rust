@@ -72,7 +72,8 @@ pub fn inspect(world: &World) -> Vec<Item> {
 }
 
 /// A text block on screen: a `Text`/math mobject, or (mid-animation, when hierarchies
-/// are flattened) all the glyphs of one top-level mobject.
+/// are flattened) all the glyphs of one top-level mobject. Its box is where it shows on
+/// screen in the base frame: camera moves, pinning and clip rectangles are applied.
 #[derive(Clone, Debug)]
 struct TextBlock {
     id: MobjectId,
@@ -81,25 +82,43 @@ struct TextBlock {
     opacity: f64,
 }
 
+/// Where a mobject's box lands on screen, in base-frame scene units: through the live camera
+/// frame unless pinned, then cut to its clip rectangle. `None` if the clip hides all of it.
+fn on_screen(b: [f64; 4], m: &VMobject, world: &World) -> Option<[f64; 4]> {
+    let f = world.frame();
+    let mut b = b;
+    if !m.effects.pinned && (f.zoom != 1.0 || f.center.is_some()) {
+        let (c, o, z) = (f.center_now(), f.base_center, f.zoom);
+        b = [(b[0] - c.x) * z + o.x, (b[1] - c.y) * z + o.y, (b[2] - c.x) * z + o.x, (b[3] - c.y) * z + o.y];
+    }
+    if let Some(c) = m.effects.clip {
+        b = [b[0].max(c[0]), b[1].max(c[1]), b[2].min(c[2]), b[3].min(c[3])];
+        if b[0] >= b[2] || b[1] >= b[3] {
+            return None;
+        }
+    }
+    Some(b)
+}
+
 fn text_blocks(world: &World) -> Vec<TextBlock> {
     let mut out = Vec::new();
     for &id in world.displayed() {
         let top = &world[id];
         let mut found = false;
         // Prefer tagged text units (keeps sentences inside one group apart).
-        fn walk(m: &VMobject, id: MobjectId, out: &mut Vec<TextBlock>, found: &mut bool) {
+        fn walk(m: &VMobject, id: MobjectId, out: &mut Vec<TextBlock>, found: &mut bool, world: &World) {
             if matches!(m.meta.kind(), "Text" | "Math" | "DecimalNumber" | "Integer") {
-                if let Some(b) = bbox(m) {
+                if let Some(b) = bbox(m).and_then(|b| on_screen(b, m, world)) {
                     out.push(TextBlock { id, label: m.describe(), bbox: b, opacity: opacity(m) });
-                    *found = true;
                 }
+                *found = true;
                 return;
             }
             for c in &m.children {
-                walk(c, id, out, found);
+                walk(c, id, out, found, world);
             }
         }
-        walk(top, id, &mut out, &mut found);
+        walk(top, id, &mut out, &mut found, world);
         if !found {
             // Flattened during an animation: gather glyph leaves.
             let glyphs: Vec<&VMobject> = top.family().into_iter().filter(|m| m.meta.char_index.is_some()).collect();
@@ -107,7 +126,7 @@ fn text_blocks(world: &World) -> Vec<TextBlock> {
                 continue;
             }
             let g = VMobject::group(glyphs.iter().map(|m| VMobject { children: vec![], ..(*m).clone() }).collect());
-            if let Some(b) = bbox(&g) {
+            if let Some(b) = bbox(&g).and_then(|b| on_screen(b, glyphs[0], world)) {
                 out.push(TextBlock { id, label: top.describe(), bbox: b, opacity: opacity(&g) });
             }
         }

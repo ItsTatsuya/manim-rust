@@ -140,6 +140,21 @@ declare module "manim" {
     fade(darkness?: number): this;
     setColorByGradient(...colors: Color[]): this;
     setZIndex(z: number): this;
+    /** Dash the stroke: dashes `length` long with `gap` between them (scene units). Dashes are cut at draw time, so `Create` draws a dashed line on and animating `phase` (`m.animate.setDash(l, g, phase)`) makes them march. */
+    setDash(length?: number, gap?: number, phase?: number): this;
+    clearDash(): this;
+    /** Linear gradient fill over the bounding box. `angle` in radians, 0 = left to right, counter-clockwise (CSS `135deg` is `-PI / 4`). Stops are `[position 0..1, color, opacity?]`; the fill opacity still scales them, so `setFill(color, 1)` first. */
+    setGradient(angle: number, stops: [position: number, color: Color, opacity?: number][]): this;
+    /** Soft drop shadow outside the outline. `blur` is the standard deviation in scene units; `dy` is negative for a shadow below. */
+    setShadow(color?: Color, opacity?: number, blur?: number, dx?: number, dy?: number): this;
+    clearShadow(): this;
+    /** Blur everything drawn below this mobject, inside its outline, by `sigma` scene units (frosted glass). The mobject needs a shape but no visible fill. */
+    setBackdropBlur(sigma: number): this;
+    /** Keep this mobject and its children where they are when the camera moves. Children added later are not pinned. */
+    pin(on?: boolean): this;
+    /** Clip this mobject and its children to a rectangle of the base frame (so content zoomed by the camera stays inside its panel). */
+    clipTo(left: number, bottom: number, right: number, top: number): this;
+    clearClip(): this;
     /** Recolor every occurrence of `needle` in a text. */
     setColorText(needle: string, color: Color): this;
     setColorChars(start: number, end: number, color: Color): this;
@@ -519,6 +534,19 @@ declare module "manim" {
   export const Rotating: typeof Rotate;
   export const MoveAlongPath: A<[m: Mobject, path: Mobject, options?: AnimationOptions]>;
   export const Wait: A<[runTime?: number]>;
+  /**
+   * Move and zoom the camera frame. Give `zoom` (2 shows half the width) or `width` (visible width in
+   * scene units) and optionally `center`; or `focus: {point, anchor}` to push in on `point` while it glides to
+   * `anchor` (a position in the base frame), which is how to zoom a panel on one spot; or `reset: true`.
+   * Pinned mobjects, the overlay and the background do not move with it.
+   */
+  export const MoveCamera: (options: AnimationOptions & {
+    zoom?: number;
+    width?: number;
+    center?: Point;
+    focus?: { point: Point; anchor?: Point };
+    reset?: boolean;
+  }) => Animation;
   export const AnimationGroup: A<(Animation | AnimateBuilder<Mobject> | AnimationOptions)[]>;
   /** Start each animation a little after the previous (lagRatio 0.05 unless set). */
   export const LaggedStart: A<(Animation | AnimateBuilder<Mobject> | AnimationOptions)[]>;

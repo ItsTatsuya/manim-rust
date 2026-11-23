@@ -16,6 +16,7 @@ use serde_json::{json, Value};
 use crate::animation::*;
 use crate::color::{Color, BLACK, PURE_YELLOW, YELLOW_C};
 use crate::constants::*;
+use crate::effects::{Gradient, GradientStop, Shadow};
 use crate::mobject::code::{Code, CodeBackground};
 use crate::mobject::geometry::*;
 use crate::mobject::graphing::{Axes, NumberPlane};
@@ -649,6 +650,44 @@ fn apply_op(m: VMobject, name: &str, args: &[Value], refs: &Refs) -> Result<VMob
         "setStrokeOpacity" => m.set_stroke_opacity(arg_num(args, 0, 1.0)),
         "setOpacity" => m.set_opacity(arg_num(args, 0, 1.0)),
         "fade" => m.fade(arg_num(args, 0, 0.5)),
+        "setDash" => m.set_dash(arg_num(args, 0, 0.1), arg_num(args, 1, 0.1), arg_num(args, 2, 0.0)),
+        "clearDash" => m.clear_dash(),
+        "setGradient" => {
+            // setGradient(angle in radians, [[position, color, opacity?], ...])
+            let stops: Vec<GradientStop> = arg(args, 1)
+                .as_array()
+                .context("setGradient: stops must be a list of [position, color, opacity?]")?
+                .iter()
+                .map(|s| {
+                    let a = s.as_array().context("setGradient: a stop is [position, color, opacity?]")?;
+                    let c = a.get(1).and_then(color).context("setGradient: a stop needs a color")?;
+                    let o = a.get(2).and_then(Value::as_f64).unwrap_or(1.0) as f32;
+                    Ok(GradientStop { at: a.first().and_then(Value::as_f64).unwrap_or(0.0), color: c.with_alpha(o) })
+                })
+                .collect::<Result<_>>()?;
+            if stops.len() < 2 {
+                bail!("setGradient needs at least two stops");
+            }
+            m.set_gradient(Gradient { angle: arg_num(args, 0, 0.0), stops })
+        }
+        "setShadow" => {
+            // setShadow(color, opacity, blur, dx, dy)
+            let c = arg_color(args, 0, "setShadow")?.with_alpha(arg_num(args, 1, 0.35) as f32);
+            m.set_shadow(Shadow {
+                color: c,
+                blur: arg_num(args, 2, 0.3),
+                dx: arg_num(args, 3, 0.0),
+                dy: arg_num(args, 4, -0.2),
+            })
+        }
+        "clearShadow" => m.clear_shadow(),
+        "setBackdropBlur" => m.set_backdrop_blur(arg_num(args, 0, 0.0)),
+        "pin" => m.pin(arg(args, 0).as_bool().unwrap_or(true)),
+        "clipTo" => m.clip_to(
+            pt(arg_num(args, 0, 0.0), arg_num(args, 1, 0.0)),
+            pt(arg_num(args, 2, 0.0), arg_num(args, 3, 0.0)),
+        ),
+        "clearClip" => m.clear_clip(),
         "setColorByGradient" => {
             let cs: Vec<Color> = args
                 .iter()
@@ -1519,6 +1558,27 @@ fn build_anim(st: &mut State, spec: &Value, pops: &mut Vec<Pop>) -> Result<Built
             Box::new(ChangeValue::new(tracker, opt_num(spec, "value").unwrap_or(0.0)))
         }
         "Wait" => Box::new(Wait::new(opt_num(spec, "runTime").unwrap_or(1.0))),
+        "MoveCamera" => {
+            // `width` is the visible width in scene units; `zoom` multiplies the base frame.
+            let base_w = scene(st)?.frame_size().0;
+            let zoom = match (opt_num(spec, "zoom"), opt_num(spec, "width")) {
+                (Some(z), _) => Some(z),
+                (None, Some(w)) => Some(base_w / w),
+                _ => None,
+            };
+            if zoom.is_some_and(|z| !(z.is_finite() && z > 0.0)) {
+                bail!("MoveCamera: zoom and width must be positive numbers");
+            }
+            match spec.get("focus") {
+                Some(f) => {
+                    let p = opt_point(f, "point").context("MoveCamera focus needs a point")?;
+                    let anchor = opt_point(f, "anchor").unwrap_or(p);
+                    Box::new(MoveCamera::zoom_on(p, zoom.unwrap_or(1.0), anchor))
+                }
+                None if spec.get("reset").and_then(Value::as_bool).unwrap_or(false) => Box::new(MoveCamera::reset()),
+                None => Box::new(MoveCamera::to(zoom, opt_point(spec, "center"))),
+            }
+        }
         "AnimationGroup" | "LaggedStart" | "Succession" => {
             let mut children = Vec::new();
             for c in spec.get("anims").and_then(Value::as_array).cloned().unwrap_or_default() {

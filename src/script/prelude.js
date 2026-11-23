@@ -211,6 +211,21 @@ export class Mobject {
   fade(darkness = 0.5) { return this._op("fade", darkness); }
   setColorByGradient(...colors) { return this._op("setColorByGradient", colors.flat()); }
   setZIndex(z) { return this._op("setZIndex", z); }
+  /** Dash the stroke: `length` long dashes with `gap` between (scene units); animate `phase` to make them march. */
+  setDash(length = 0.1, gap = length, phase = 0) { return this._op("setDash", length, gap, phase); }
+  clearDash() { return this._op("clearDash"); }
+  /** Linear gradient fill over the bounding box. `angle` in radians (0 = left to right); stops are `[position, color, opacity?]`. */
+  setGradient(angle, stops) { return this._op("setGradient", angle, stops); }
+  /** Soft drop shadow outside the outline. */
+  setShadow(color = "#000000", opacity = 0.35, blur = 0.3, dx = 0, dy = -0.2) { return this._op("setShadow", color, opacity, blur, dx, dy); }
+  clearShadow() { return this._op("clearShadow"); }
+  /** Blur everything drawn below this mobject, inside its outline, by `sigma` scene units. */
+  setBackdropBlur(sigma) { return this._op("setBackdropBlur", sigma); }
+  /** Keep this mobject (and its children) in the base frame when the camera moves. */
+  pin(on = true) { return this._op("pin", on); }
+  /** Clip this mobject (and its children) to a rectangle of the base frame. */
+  clipTo(left, bottom, right, top) { return this._op("clipTo", left, bottom, right, top); }
+  clearClip() { return this._op("clearClip"); }
   /** Recolor every occurrence of `needle` in a text. */
   setColorText(needle, color) { return this._op("setColorText", needle, color); }
   setColorChars(start, end, color) { return this._op("setColorChars", start, end, color); }
@@ -240,7 +255,7 @@ export class Mobject {
   // structure
   copy() { return wrap(N.copy(this._h), Object.getPrototypeOf(this)); }
   /** Member `i` of a group (negative counts from the end). Changes to it change the group. */
-  get(i) { return wrap(N.child(this._h, i), Mobject.prototype); }
+  get(i) { return childOf(this, i, Mobject.prototype); }
   get length() { return this._q("length"); }
   get submobjects() { const n = this.length; const out = []; for (let i = 0; i < n; i++) out.push(this.get(i)); return out; }
   [Symbol.iterator]() { return this.submobjects[Symbol.iterator](); }
@@ -252,6 +267,16 @@ export class Mobject {
 }
 
 function wrap(h, proto) { const m = Object.create(proto ?? Mobject.prototype); m._h = h; return own(m); }
+/** The same wrapper (and handle) every time member `i` of `parent` is asked for, so `g.get(0) === g.get(0)` and a loop over a group does not make a handle per access. */
+function childOf(parent, i, proto) {
+  const n = parent.length;
+  const idx = i < 0 ? n + i : i;
+  if (!(idx >= 0 && idx < n)) return wrap(N.child(parent._h, i), proto); // throws the usual out-of-range error
+  const cache = parent._kids ?? (parent._kids = new Map());
+  let w = cache.get(idx);
+  if (!w || Object.getPrototypeOf(w) !== proto) { w = wrap(N.child(parent._h, idx), proto); cache.set(idx, w); }
+  return w;
+}
 // A wrapper for a handle that other wrappers may share (scene mobjects): never released.
 function wrapShared(h) { const m = Object.create(Mobject.prototype); m._h = h; return m; }
 
@@ -372,20 +397,26 @@ export const FunctionGraph = defineMobject("FunctionGraph", Mobject, (fn, o) => 
 });
 
 /** Coordinate axes. `c2p(x, y)` maps graph coordinates to scene points. */
-export const Axes = defineMobject("Axes", Mobject, (o) => mk("Axes", o), (m, o) => { m._axesOpts = opts(o); m.__center = m.getCenter(); });
+export const Axes = defineMobject("Axes", Mobject, (o) => mk("Axes", o), (m, o) => { m._axesOpts = opts(o); m.__center = m.getCenter(); m.__size = [m.getWidth(), m.getHeight()]; });
 Object.assign(Axes.prototype, {
   _info() {
     if (!this.__info) this.__info = JSON.parse(N.axesInfo(js(this._axesOpts ?? {})));
     return this.__info;
   },
+  // How much the axes were scaled since creation (per axis), from their current size.
+  _scale() {
+    const [w0, h0] = this.__size ?? [0, 0];
+    return [w0 > 1e-9 ? this.getWidth() / w0 : 1, h0 > 1e-9 ? this.getHeight() / h0 : 1];
+  },
   c2p(x, y) {
-    // Follows the axes if they were moved after creation.
-    const i = this._info(), base = Vec3.from(i.origin);
-    const now = this.getCenter(), was = Vec3.from(this.__center ?? now);
-    return base.add(now.sub(was)).add(vec(x * i.xUnit, y * i.yUnit));
+    // Follows the axes if they were moved or scaled after creation (not rotated).
+    const i = this._info(), base = Vec3.from(i.origin).add(vec(x * i.xUnit, y * i.yUnit));
+    const now = this.getCenter(), was = Vec3.from(this.__center ?? now), [kx, ky] = this._scale();
+    const d = base.sub(was);
+    return now.add(vec(d[0] * kx, d[1] * ky, d[2]));
   },
   coordsToPoint(x, y) { return this.c2p(x, y); },
-  p2c(p) { const i = this._info(), d = Vec3.from(p).sub(this.c2p(0, 0)); return [d[0] / i.xUnit, d[1] / i.yUnit]; },
+  p2c(p) { const i = this._info(), [kx, ky] = this._scale(), d = Vec3.from(p).sub(this.c2p(0, 0)); return [d[0] / (i.xUnit * kx), d[1] / (i.yUnit * ky)]; },
   pointToCoords(p) { return this.p2c(p); },
   plot(fn, o) {
     const p = opts(o);
@@ -439,7 +470,7 @@ function gridSlice(members) {
 
 /** A group whose members are text-like (table entries, code lines): `get(i)` gives text helpers. */
 class TextGroup extends Mobject {
-  get(i) { return wrap(N.child(this._h, i), TextMobject.prototype); }
+  get(i) { return childOf(this, i, TextMobject.prototype); }
 }
 
 /** Shared by Table and Matrix. Positions are 1-based [row, col], labels included. */
@@ -639,6 +670,8 @@ export const TransformMatchingTex = function (a, b, o) { return anim("TransformM
 export const Rotate = function (target, angle = PI, o) { return anim("Rotate", { ...opts(o), target, angle }); };
 export const Rotating = Rotate;
 export const MoveAlongPath = function (target, path, o) { return anim("MoveAlongPath", { ...opts(o), target, path }); };
+/** Move and zoom the camera frame. `{zoom|width, center}`, `{focus: {point, anchor}, zoom}` to push in on a point while it glides to `anchor`, or `{reset: true}`. */
+export const MoveCamera = function (o) { return anim("MoveCamera", o); };
 export const Wait = function (runTime = 1) { return anim("Wait", { runTime }); };
 const G = (type) => function (...items) {
   const o = items.length && !(items[items.length - 1] instanceof Animation) && !(items[items.length - 1] instanceof AnimateBuilder) && !Array.isArray(items[items.length - 1]) ? opts(items.pop()) : {};
